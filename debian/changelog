@@ -1,5 +1,5 @@
-nimux (1.0) unstable; urgency=medium
+nimux (1.0.1) unstable; urgency=medium
 
-  * Initial release.
+  * Patch release for Nim 2 enum default compatibility.
 
- -- Chokri Hammedi <52697989+blue0x1@users.noreply.github.com>  Tue, 14 Jul 2026 19:30:00 +0300
+ -- Chokri Hammedi <52697989+blue0x1@users.noreply.github.com>  Wed, 15 Jul 2026 21:55:00 +0300
