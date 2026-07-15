@@ -1,4 +1,4 @@
-version       = "1.0"
+version       = "1.0.1"
 author        = "Chokri Hammedi (blue0x1)"
 description   = "Pure-Nim network enumeration and remote execution toolkit"
 license       = "AGPL-3.0-only"
