@@ -3350,7 +3350,7 @@ proc tryWinRmAuthOnce(host: string; port: int;
 
 proc checkWinRmAuth*(host: string; port: int;
                      username, password, ntlmHash, domain: string;
-                     useSsl = false; authMethod = wamNtlm; attempts = 3;
+                     useSsl = false; authMethod: WinRmAuthMethod = wamNtlm; attempts = 3;
                      ccache = ""; krb5Config = ""; spnOverride = ""): WinRmCommandResult =
   let maxAttempts = max(1, attempts)
   for attempt in 1 .. maxAttempts:
@@ -3374,7 +3374,7 @@ proc checkWinRmAuth*(host: string; port: int;
 
 proc runWinRmCommand*(host: string; port: int;
                       username, password, ntlmHash, domain, command: string;
-                      useSsl = false; authMethod = wamNtlm;
+                      useSsl = false; authMethod: WinRmAuthMethod = wamNtlm;
                       delegate = false; ccache = ""; krb5Config = "";
                       spnOverride = ""): WinRmCommandResult =
   var client = newWinRmClient(host, port, username, password, ntlmHash, domain,
@@ -3415,7 +3415,7 @@ proc cleanAssemblyOutput(output: string): string =
 proc winRmUploadFile*(host: string; port: int;
                       username, password, ntlmHash, domain: string;
                       localPath, remotePath: string;
-                      useSsl = false; authMethod = wamNtlm;
+                      useSsl = false; authMethod: WinRmAuthMethod = wamNtlm;
                       ccache = ""; krb5Config = ""; spnOverride = ""): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   if not fileExists(localPath):
@@ -3454,7 +3454,7 @@ proc winRmUploadFile*(host: string; port: int;
 proc winRmDownloadFile*(host: string; port: int;
                         username, password, ntlmHash, domain: string;
                         remotePath, localPath: string;
-                        useSsl = false; authMethod = wamNtlm;
+                        useSsl = false; authMethod: WinRmAuthMethod = wamNtlm;
                         ccache = ""; krb5Config = ""; spnOverride = ""): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   var client = newWinRmClient(host, port, username, password, ntlmHash, domain,
@@ -3494,7 +3494,7 @@ proc winRmDownloadFile*(host: string; port: int;
 proc executeManagedAssemblyFromMemory*(host: string; port: int;
                                         username, password, ntlmHash, domain: string;
                                         localPath: string; runArgs: seq[string];
-                                        useSsl = false; authMethod = wamNtlm;
+                                        useSsl = false; authMethod: WinRmAuthMethod = wamNtlm;
                                         ccache = ""; krb5Config = ""; spnOverride = ""): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   if not fileExists(localPath):
@@ -3539,7 +3539,7 @@ proc executeManagedAssemblyFromMemory*(host: string; port: int;
 proc executeManagedAssemblyViaRunner*(host: string; port: int;
                                        username, password, ntlmHash, domain: string;
                                        localPath: string; runArgs: seq[string];
-                                       useSsl = false; authMethod = wamNtlm;
+                                       useSsl = false; authMethod: WinRmAuthMethod = wamNtlm;
                                        ccache = ""; krb5Config = ""; spnOverride = ""): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   if not fileExists(localPath):
@@ -3615,7 +3615,7 @@ proc executeManagedAssemblyViaRunner*(host: string; port: int;
 proc executeManagedAssemblyDirectExe*(host: string; port: int;
                                        username, password, ntlmHash, domain: string;
                                        localPath: string; runArgs: seq[string];
-                                       useSsl = false; authMethod = wamNtlm;
+                                       useSsl = false; authMethod: WinRmAuthMethod = wamNtlm;
                                        ccache = ""; krb5Config = ""; spnOverride = ""): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   if not fileExists(localPath):
@@ -3664,7 +3664,7 @@ proc executeManagedAssemblyDirectExe*(host: string; port: int;
 proc runManagedAssemblyFromRemotePath*(host: string; port: int;
                                         username, password, ntlmHash, domain: string;
                                         remotePath: string; runArgs: seq[string];
-                                        useSsl = false; authMethod = wamNtlm;
+                                        useSsl = false; authMethod: WinRmAuthMethod = wamNtlm;
                                         ccache = ""; krb5Config = ""; spnOverride = ""): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   if remotePath.len == 0:
@@ -3717,7 +3717,7 @@ proc looksLikeRunnerExecError(output: string): bool =
 proc executeAssembly*(host: string; port: int;
                       username, password, ntlmHash, domain: string;
                       localPath: string; runArgs: seq[string];
-                      useSsl = false; authMethod = wamNtlm;
+                      useSsl = false; authMethod: WinRmAuthMethod = wamNtlm;
                       ccache = ""; krb5Config = ""; spnOverride = ""): WinRmCommandResult =
   result = executeManagedAssemblyDirectExe(host, port, username, password, ntlmHash,
     domain, localPath, runArgs, useSsl, authMethod, ccache, krb5Config, spnOverride)

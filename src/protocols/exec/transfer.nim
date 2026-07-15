@@ -48,7 +48,7 @@ proc ensureRemoteDirOnTree*(session: smb.SmbSession; treeId: uint32;
 proc ensureRemoteDir*(host: string; port, timeoutMs: int;
                       username, password, ntlmHash, domain: string;
                       share, remoteDir: string;
-                      authMethod = smb.samNtlm; ccache = "";
+                      authMethod: smb.SmbAuthMethod = smb.samNtlm; ccache = "";
                       krb5Config = ""): Future[SmbTransferResult] {.async.} =
   result.host = host
   result.share = share
@@ -124,7 +124,7 @@ proc putFile*(host: string; port, timeoutMs: int;
               username, password, ntlmHash, domain: string;
               share, remotePath, localPath: string;
               progress: SmbTransferProgress = nil;
-              authMethod = smb.samNtlm; ccache = "";
+              authMethod: smb.SmbAuthMethod = smb.samNtlm; ccache = "";
               krb5Config = ""): Future[SmbTransferResult] {.async.} =
   let credential = smb.SmbCredential(
     username: username, password: password,
@@ -204,7 +204,7 @@ proc getFile*(host: string; port, timeoutMs: int;
               username, password, ntlmHash, domain: string;
               share, remotePath, localPath: string;
               progress: SmbTransferProgress = nil;
-              authMethod = smb.samNtlm; ccache = "";
+              authMethod: smb.SmbAuthMethod = smb.samNtlm; ccache = "";
               krb5Config = ""): Future[SmbTransferResult] {.async.} =
   let credential = smb.SmbCredential(
     username: username, password: password,
@@ -222,7 +222,7 @@ proc getFile*(host: string; port, timeoutMs: int;
 proc deleteFile*(host: string; port, timeoutMs: int;
                  username, password, ntlmHash, domain: string;
                  share, remotePath: string;
-                 authMethod = smb.samNtlm; ccache = "";
+                 authMethod: smb.SmbAuthMethod = smb.samNtlm; ccache = "";
                  krb5Config = ""): Future[SmbTransferResult] {.async.} =
   let credential = smb.SmbCredential(
     username: username, password: password,

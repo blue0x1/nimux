@@ -106,7 +106,7 @@ proc deleteRemoteFiles(host: string; port, timeoutMs: int;
 proc coerceViaRemoteTask*(host: string; port, timeoutMs: int;
                           username, password, ntlmHash, domain: string;
                           target, listener: string;
-                          authMethod = smb.samNtlm; ccache = "";
+                          authMethod: smb.SmbAuthMethod = smb.samNtlm; ccache = "";
                           krb5Config = ""): Future[SpoolCoerceResult] {.async.} =
   result.host = host
   result.target = target

@@ -150,7 +150,7 @@ proc atexecSealedCall(ctx: smb.SmbRpcCtx; pipe: smb.SmbPipeInfo;
 
 proc atExec*(host: string; port, timeoutMs: int;
              username, password, ntlmHash, domain, command: string;
-             authMethod = smb.samNtlm;
+             authMethod: smb.SmbAuthMethod = smb.samNtlm;
              ccache = "";
              krb5Config = "";
              outputPreDelayMs = 0): Future[AtExecResult] {.async.} =
@@ -230,7 +230,7 @@ proc atExec*(host: string; port, timeoutMs: int;
 
 proc openAtExecSession*(host: string; port, timeoutMs: int;
                         username, password, ntlmHash, domain: string;
-                        authMethod = smb.samNtlm;
+                        authMethod: smb.SmbAuthMethod = smb.samNtlm;
                         ccache = "";
                         krb5Config = ""): Future[AtExecSession] {.async.} =
   result = AtExecSession()

@@ -369,7 +369,7 @@ proc establishPsexecSmbSession(host: string; port, timeoutMs: int;
 proc psExec*(host: string; port, timeoutMs: int;
              username, password, ntlmHash, domain, command: string;
              keepBinary = false;
-             authMethod = smb.samNtlm;
+             authMethod: smb.SmbAuthMethod = smb.samNtlm;
              ccache = ""): Future[PsExecResult] {.async.} =
   result.host = host
   result.port = port
@@ -535,7 +535,7 @@ proc psExec*(host: string; port, timeoutMs: int;
 
 proc openPsExecSession*(host: string; port, timeoutMs: int;
                         username, password, ntlmHash, domain: string;
-                        authMethod = smb.samNtlm;
+                        authMethod: smb.SmbAuthMethod = smb.samNtlm;
                         ccache = ""): Future[PsExecSession] {.async.} =
   result = PsExecSession()
   let svcBinary = buildServiceBinary()

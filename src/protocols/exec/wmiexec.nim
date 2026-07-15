@@ -27,7 +27,7 @@ proc randomToken(): string =
 proc wmiExec*(host: string; port, timeoutMs: int;
               username, password, ntlmHash, domain, command: string;
               namespace = "root\\cimv2";
-              authMethod = smb.samNtlm;
+              authMethod: smb.SmbAuthMethod = smb.samNtlm;
               ccache = ""): Future[WmiExecResult] {.async.} =
   result.host = host
   result.username = username
@@ -74,7 +74,7 @@ proc wmiExec*(host: string; port, timeoutMs: int;
 proc openWmiExecSession*(host: string; port, timeoutMs: int;
                          username, password, ntlmHash, domain: string;
                          namespace = "root\\cimv2";
-                         authMethod = smb.samNtlm;
+                         authMethod: smb.SmbAuthMethod = smb.samNtlm;
                          ccache = ""): Future[WmiExecResult] {.async.} =
   result = await wmiExec(host, port, timeoutMs, username, password, ntlmHash, domain,
                          "cd", namespace, authMethod, ccache)
@@ -82,7 +82,7 @@ proc openWmiExecSession*(host: string; port, timeoutMs: int;
 proc runWmiExecShellCommand*(host: string; port, timeoutMs: int;
                              username, password, ntlmHash, domain, command: string;
                              namespace = "root\\cimv2";
-                             authMethod = smb.samNtlm;
+                             authMethod: smb.SmbAuthMethod = smb.samNtlm;
                              ccache = ""):
     Future[tuple[output, err: string]] {.async.} =
   let r = await wmiExec(host, port, timeoutMs, username, password, ntlmHash,

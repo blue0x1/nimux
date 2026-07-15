@@ -231,7 +231,7 @@ proc parseInvokeDispatch(stub: string): string =
 proc dcomExec*(host: string; port, timeoutMs: int;
                username, password, ntlmHash, domain, command: string;
                objectType = "MMC20";
-               authMethod = smb.samNtlm): Future[DcomExecResult] {.async.} =
+               authMethod: smb.SmbAuthMethod = smb.samNtlm): Future[DcomExecResult] {.async.} =
   result.host = host
   result.username = username
   result.domain = domain

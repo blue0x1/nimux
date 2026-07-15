@@ -315,7 +315,7 @@ proc checkWinRmAuth*(
   port: int;
   username, password, ntlmHash, domain: string;
   useSsl = false;
-  authMethod = wamNtlm;
+  authMethod: WinRmAuthMethod = wamNtlm;
   attempts = 3
 ): WinRmCommandResult =
   let maxAttempts = max(1, attempts)
@@ -343,7 +343,7 @@ proc runWinRmCommand*(
   port: int;
   username, password, ntlmHash, domain, command: string;
   useSsl = false;
-  authMethod = wamNtlm;
+  authMethod: WinRmAuthMethod = wamNtlm;
   timeoutMs = 0;
   forcePsrp = false
 ): WinRmCommandResult =
@@ -457,7 +457,7 @@ proc winRmUploadFile*(host: string; port: int;
                       username, password, ntlmHash, domain: string;
                       localPath, remotePath: string;
                       useSsl = false;
-                      authMethod = wamNtlm): WinRmCommandResult =
+                      authMethod: WinRmAuthMethod = wamNtlm): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   if not fileExists(localPath):
     result.message = "local file not found: " & localPath
@@ -491,7 +491,7 @@ proc winRmDownloadFile*(host: string; port: int;
                         username, password, ntlmHash, domain: string;
                         remotePath, localPath: string;
                         useSsl = false;
-                        authMethod = wamNtlm): WinRmCommandResult =
+                        authMethod: WinRmAuthMethod = wamNtlm): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   var client = newTransferClient(host, port, username, password, ntlmHash, domain,
     useSsl, authMethod)
@@ -539,7 +539,7 @@ proc executeManagedAssemblyFromMemory*(host: string; port: int;
                                        username, password, ntlmHash, domain: string;
                                        localPath: string; runArgs: seq[string];
                                        useSsl = false;
-                                       authMethod = wamNtlm): WinRmCommandResult =
+                                       authMethod: WinRmAuthMethod = wamNtlm): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   if not fileExists(localPath):
     result.message = "local file not found: " & localPath
@@ -606,7 +606,7 @@ proc runManagedAssemblyFromRemotePath*(host: string; port: int;
                                        username, password, ntlmHash, domain: string;
                                        remotePath: string; runArgs: seq[string];
                                        useSsl = false;
-                                       authMethod = wamNtlm): WinRmCommandResult =
+                                       authMethod: WinRmAuthMethod = wamNtlm): WinRmCommandResult =
   result = WinRmCommandResult(host: host, port: port)
   if remotePath.len == 0:
     result.message = "remote path must not be empty"
@@ -658,7 +658,7 @@ proc executeAssembly*(host: string; port: int;
                       username, password, ntlmHash, domain: string;
                       localPath: string; runArgs: seq[string];
                       useSsl = false;
-                      authMethod = wamNtlm): WinRmCommandResult =
+                      authMethod: WinRmAuthMethod = wamNtlm): WinRmCommandResult =
   result = executeManagedAssemblyFromMemory(host, port, username, password, ntlmHash,
     domain, localPath, runArgs, useSsl, authMethod)
   if result.success and not looksLikeAssemblyFsDependencyError(result.output):

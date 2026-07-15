@@ -3576,7 +3576,7 @@ type
 
 proc establishSmbSession*(host: string; port, timeoutMs: int;
                           credential: SmbCredential;
-                          authMethod = samNtlm): Future[SmbSession] {.async.} =
+                          authMethod: SmbAuthMethod = samNtlm): Future[SmbSession] {.async.} =
   result = SmbSession()
   var socket = scannercore.newTcpAsyncSocket(host)
   let connected = await netproxy.connectTcp(socket, host, port, timeoutMs)
@@ -3810,7 +3810,7 @@ proc establishSmbSession*(host: string; port, timeoutMs: int;
 proc samrChangePasswordHashes*(host: string; port, timeoutMs: int;
                                credential: SmbCredential;
                                username, oldNtHash, newNtHash: string;
-                               authMethod = samNtlm): Future[SamrChangePasswdResult] {.async.} =
+                               authMethod: SmbAuthMethod = samNtlm): Future[SamrChangePasswdResult] {.async.} =
   result = SamrChangePasswdResult(host: host, port: port)
   var session: SmbSession
   try:
@@ -3897,7 +3897,7 @@ proc samrChangePasswordHashes*(host: string; port, timeoutMs: int;
 proc addComputerSamr*(host: string; port, timeoutMs: int;
                       credential: SmbCredential;
                       computerName, computerPassword: string;
-                      authMethod = samNtlm): Future[SamrAddComputerResult] {.async.} =
+                      authMethod: SmbAuthMethod = samNtlm): Future[SamrAddComputerResult] {.async.} =
   result = SamrAddComputerResult(host: host, port: port)
   let samName = normalizeComputerSam(computerName)
   result.samAccountName = samName

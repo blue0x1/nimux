@@ -174,7 +174,7 @@ proc parseStatusOnly(stub: string; offset = 0): uint32 =
 proc smbExec*(host: string; port, timeoutMs: int;
               username, password, ntlmHash, domain, command: string;
               waitMs = 1500;
-              authMethod = smb.samNtlm;
+              authMethod: smb.SmbAuthMethod = smb.samNtlm;
               ccache = ""): Future[SmbExecResult] {.async.} =
   result.host = host
   result.port = port
@@ -261,7 +261,7 @@ proc smbExec*(host: string; port, timeoutMs: int;
 
 proc openSmbExecSession*(host: string; port, timeoutMs: int;
                          username, password, ntlmHash, domain: string;
-                         authMethod = smb.samNtlm;
+                         authMethod: smb.SmbAuthMethod = smb.samNtlm;
                          ccache = ""): Future[SmbExecSession] {.async.} =
   result = SmbExecSession()
   let cred = smb.SmbCredential(username: username, password: password,

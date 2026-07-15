@@ -148,7 +148,7 @@ proc dumpTicketsViaTask*(host: string; port, timeoutMs: int;
                          username, password, ntlmHash, domain: string;
                          ticketUser = ""; ticketService = "krbtgt";
                          seconds = 1; interval = 1;
-                         authMethod = smb.samNtlm; ccache = "";
+                         authMethod: smb.SmbAuthMethod = smb.samNtlm; ccache = "";
                          krb5Config = "";
                          onUpdate: TicketDumpUpdate = nil): Future[TicketDumpResult] {.async.} =
   result.host = host
