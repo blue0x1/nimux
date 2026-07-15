@@ -1,0 +1,27 @@
+Source: nimux
+Section: net
+Priority: optional
+Maintainer: Chokri Hammedi <52697989+blue0x1@users.noreply.github.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ libkrb5-dev,
+ libssl-dev,
+ mingw-w64
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: nimux
+Architecture: any
+Depends:
+ krb5-user,
+ mingw-w64,
+ ${misc:Depends},
+ ${shlibs:Depends},
+Suggests:
+ nim,
+Description: pure-Nim network enumeration and remote execution toolkit
+ nimux is a native network enumeration and remote execution toolkit for
+ authorized security assessment workflows.
+ .
+ Nim and MinGW are needed for remote execution features that build Windows
+ helper binaries on demand.

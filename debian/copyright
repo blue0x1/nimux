@@ -1,0 +1,10 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: nimux
+Source: https://github.com/blue0x1/nimux
+
+Files: *
+Copyright: 2026 Chokri Hammedi
+License: AGPL-3.0-only
+ This package is licensed under the GNU Affero General Public License
+ version 3.0 only. See /usr/share/common-licenses/AGPL-3 when available,
+ or the upstream LICENSE file.
