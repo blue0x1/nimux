@@ -1,6 +1,6 @@
-<h1 align="center">nimux</h1>
+<img width="1368" height="377" alt="01-nimux" src="https://github.com/user-attachments/assets/a2463702-6969-442a-822e-868b28409021" />
 
-<p align="center">Pure-Nim network enumeration and remote execution toolkit</p>
+<p align="center"><i></i>Pure-Nim network enumeration and remote execution toolkit</i></p>
 
 <p align="center">
   <a href="https://github.com/blue0x1/nimux/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>
@@ -130,6 +130,8 @@ Run command help:
 ./nimux smb --help
 ./nimux kerberos --help
 ```
+# Credits 
+Chokri Hammedi
 
 # License
 
