@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	$(MAKE) linux SETCAP=0
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	$(MAKE) install DESTDIR=$(CURDIR)/debian/nimux PREFIX=/usr SETCAP=0
