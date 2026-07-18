@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "nimux": {
+      "command": "/opt/nimux/integrations/mcp/nimux-mcp/nimux_mcp",
+      "env": {
+        "NIMUX_BIN": "/usr/local/bin/nimux",
+        "NIMUX_MCP_POLICY": "/opt/nimux/mcp-policy.json",
+        "NIMUX_MCP_STATE": "/opt/nimux/nimux-mcp-state.json"
+      }
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "nimux-dev": {
+      "command": "/home/katana/nim/integrations/mcp/nimux-mcp/nimux_mcp",
+      "env": {
+        "NIMUX_BIN": "/home/katana/nim/nimux",
+        "NIMUX_MCP_POLICY": "/home/katana/nim/integrations/mcp/nimux-mcp/policy.example.json",
+        "NIMUX_MCP_STATE": "/tmp/nimux-mcp-state.json"
+      }
+    }
+  }
+}

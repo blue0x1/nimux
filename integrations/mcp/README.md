@@ -31,6 +31,23 @@ NIMUX_MCP_POLICY=./policy.example.json \
 
 ## Client Config
 
+Ready-to-copy config examples are available in:
+
+```text
+examples/
+```
+
+Files:
+
+```text
+examples/codex.config.toml
+examples/claude-desktop.json
+examples/cursor.json
+examples/windsurf.json
+examples/generic-stdio.json
+examples/local-dev.json
+```
+
 ```json
 {
   "mcpServers": {

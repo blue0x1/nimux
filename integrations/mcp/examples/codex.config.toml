@@ -1,0 +1,15 @@
+# Example Codex MCP configuration for nimux.
+#
+# Copy this block into one of:
+#   ~/.codex/config.toml
+#   .codex/config.toml
+#
+# Adjust every path for your installation.
+
+[mcp_servers.nimux]
+enabled = true
+required = false
+command = "/opt/nimux/integrations/mcp/nimux-mcp/nimux_mcp"
+env = { NIMUX_BIN = "/usr/local/bin/nimux", NIMUX_MCP_POLICY = "/opt/nimux/mcp-policy.json", NIMUX_MCP_STATE = "/opt/nimux/nimux-mcp-state.json" }
+startup_timeout_sec = 10.0
+tool_timeout_sec = 120.0
