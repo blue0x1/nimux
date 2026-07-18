@@ -103,6 +103,28 @@ chmod +x nimux
 ./nimux --help
 ```
 
+## Docker
+
+The public container image is available from GitHub Container Registry:
+
+```bash
+docker run --rm -it --network host ghcr.io/blue0x1/nimux:latest --help
+```
+
+Run a scan:
+
+```bash
+docker run --rm -it --network host ghcr.io/blue0x1/nimux:latest \
+  scan 10.10.10.0/24 --ports 445,389,5985 --open
+```
+
+Run the MCP wrapper:
+
+```bash
+docker run --rm -i --network host --entrypoint nimux_mcp \
+  ghcr.io/blue0x1/nimux:latest
+```
+
 ## Build From Source
 
 ```bash
