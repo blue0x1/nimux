@@ -92,7 +92,7 @@ Download the latest Linux binary or Debian package from the releases page.
 Install the Debian package:
 
 ```bash
-sudo dpkg -i nimux_1.0_amd64.deb
+sudo dpkg -i nimux_*_amd64.deb
 sudo apt --fix-broken install
 ```
 

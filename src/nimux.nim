@@ -32,7 +32,7 @@ import protocols/postgres/client as pgclient
 import protocols/http/client as httpclient
 import protocols/nfs/client as nfsclient
 
-const Version = "1.0.1"
+const Version = "1.0.2"
 const Author = "Chokri Hammedi (blue0x1)"
 const FileAttributeReparsePoint = 0x00000400'u32
 

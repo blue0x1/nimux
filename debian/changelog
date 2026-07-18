@@ -1,3 +1,9 @@
+nimux (1.0.2) unstable; urgency=medium
+
+  * Add MCP wrapper documentation and integration updates.
+
+ -- Chokri Hammedi <52697989+blue0x1@users.noreply.github.com>  Sat, 18 Jul 2026 22:30:00 +0300
+
 nimux (1.0.1) unstable; urgency=medium
 
   * Patch release for Nim 2 enum default compatibility.
