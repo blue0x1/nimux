@@ -1,6 +1,6 @@
 {
   "name": "nimux-mcp",
-  "description": "Proposed MCP tool surface for nimux.",
+  "description": "MCP tool surface for nimux.",
   "tools": [
     {
       "name": "nimux.scan",

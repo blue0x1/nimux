@@ -1,16 +1,31 @@
-# nimux MCP Integration Plan
+# nimux MCP Integration
 
-This document describes a future MCP server that exposes `nimux` as structured tools for AI clients.
+This directory contains the first working MCP wrapper for nimux.
 
-For the full CLI command surface that the MCP server should eventually cover, see `../COMMAND_SURFACE.md`.
+For the full CLI command surface that the wrapper tracks, see `../COMMAND_SURFACE.md`.
 
-The MCP server should be a separate binary or package, for example:
+The first implementation is in:
 
 ```text
-nimux-mcp
+nimux-mcp/
 ```
 
-The main `nimux` binary should stay independent from AI providers and model APIs.
+It is a separate Nim package that wraps the installed `nimux` binary through stdio JSON-RPC. The main `nimux` binary stays independent from AI providers and model APIs.
+
+## Build
+
+```bash
+cd integrations/mcp/nimux-mcp
+nimble build -y
+```
+
+## Run
+
+```bash
+NIMUX_BIN=/path/to/nimux \
+NIMUX_MCP_POLICY=./policy.example.json \
+./nimux_mcp
+```
 
 ## Goals
 
@@ -27,29 +42,29 @@ The main `nimux` binary should stay independent from AI providers and model APIs
 - Do not bypass operator approval.
 - Do not expose raw secrets unless explicitly requested.
 
-## Proposed Tools
+## Implemented Tools
 
 ```text
 nimux.scan
-nimux.smb_probe
 nimux.smb_enum
 nimux.ldap_query
 nimux.kerberos_request
-nimux.kerberos_describe
 nimux.winrm_command
-nimux.remote_shell_prepare
-nimux.gpo_dry_run
-nimux.gpo_apply
-nimux.shadow_credentials_dry_run
+nimux.remote_exec
 nimux.socks_deploy
 nimux.socks_status
 nimux.socks_cleanup
 nimux.proxy_scan
-nimux.proxy_command
+nimux.gpo_dry_run
+nimux.gpo_apply
+nimux.file_operation
+nimux.database_query
+nimux.secrets
+nimux.protocol_probe
 nimux.report_summary
 ```
 
-Future parity should cover every top-level `nimux` command family:
+The wrapper maps the main command families into typed tool calls:
 
 ```text
 scan, smb, ldap, kerberos, krb5conf, winrm, scm, bin, cim, tsch, mmc,
@@ -124,34 +139,33 @@ The MCP server should reject write operations unless:
 - an approval token is present
 - rollback output is configured where supported
 
-## Suggested Policy File
+## Policy File
 
-```yaml
-scope:
-  name: corp-lab
-  domains:
-    - corp.local
-  cidrs:
-    - 10.10.10.0/24
-  hosts:
-    - dc01.corp.local
-
-defaults:
-  json: true
-  redact: true
-  dry_run_writes: true
-  rollback_dir: ./rollback
-  evidence_dir: ./evidence
-
-allow:
-  read_only: true
-  remote_execution: false
-  secrets: false
-  dcsync: false
-  ldap_writes: false
-  gpo_writes: false
-  socks_deploy: false
-  proxy_reuse: true
+```json
+{
+  "scope": {
+    "name": "corp-lab",
+    "domains": ["corp.local"],
+    "cidrs": ["10.10.10.0/24"],
+    "hosts": ["dc01.corp.local"]
+  },
+  "defaults": {
+    "redact": true,
+    "require_approval": true,
+    "rollback_dir": "./rollback",
+    "evidence_dir": "./evidence"
+  },
+  "allow": {
+    "read_only": true,
+    "remote_execution": false,
+    "secrets": false,
+    "dcsync": false,
+    "ldap_writes": false,
+    "gpo_writes": false,
+    "socks_deploy": false,
+    "proxy_reuse": true
+  }
+}
 ```
 
 ## Output Redaction
@@ -176,9 +190,7 @@ token
 
 ## Implementation Notes
 
-The MCP server can wrap `nimux` as a subprocess first.
-
-Recommended approach:
+The wrapper currently calls the installed `nimux` binary as a subprocess:
 
 ```text
 MCP request
@@ -190,4 +202,9 @@ MCP request
   -> return structured result
 ```
 
-Only after the subprocess wrapper is stable should native Nim library bindings be considered.
+## Roadmap
+
+- Add Content-Length framing for MCP clients that require full MCP transport framing.
+- Add streaming command output for long-running operations.
+- Add optional native Nim library bindings after the subprocess wrapper stabilizes.
+- Expand structured parsers for each JSON output shape.

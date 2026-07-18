@@ -1,0 +1,25 @@
+{
+  "scope": {
+    "name": "corp-lab",
+    "domains": ["corp.local"],
+    "cidrs": ["10.10.10.0/24"],
+    "hosts": ["dc01.corp.local", "host01.corp.local"]
+  },
+  "defaults": {
+    "redact": true,
+    "require_approval": true,
+    "evidence_dir": "./evidence",
+    "rollback_dir": "./rollback"
+  },
+  "allow": {
+    "read_only": true,
+    "remote_execution": false,
+    "secrets": false,
+    "dcsync": false,
+    "ldap_writes": false,
+    "gpo_writes": false,
+    "socks_deploy": false,
+    "proxy_reuse": true
+  }
+}
+
