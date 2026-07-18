@@ -8,7 +8,7 @@ The core `nimux` binary remains independent. These files teach external agents a
 
 ```text
 integrations/
-  claude/SKILLS.md
+  claude/CLAUDE.md
   codex/SKILL.md
   COMMAND_SURFACE.md
   mcp/README.md
