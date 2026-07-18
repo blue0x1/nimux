@@ -12,6 +12,8 @@ nimux-mcp/
 
 It is a separate Nim package that wraps the installed `nimux` binary through stdio JSON-RPC. The main `nimux` binary stays independent from AI providers and model APIs.
 
+The wrapper supports MCP `Content-Length` framing for real clients and newline-delimited JSON-RPC for local smoke tests.
+
 ## Build
 
 ```bash
@@ -25,6 +27,22 @@ nimble build -y
 NIMUX_BIN=/path/to/nimux \
 NIMUX_MCP_POLICY=./policy.example.json \
 ./nimux_mcp
+```
+
+## Client Config
+
+```json
+{
+  "mcpServers": {
+    "nimux": {
+      "command": "/path/to/integrations/mcp/nimux-mcp/nimux_mcp",
+      "env": {
+        "NIMUX_BIN": "/usr/local/bin/nimux",
+        "NIMUX_MCP_POLICY": "/path/to/policy.json"
+      }
+    }
+  }
+}
 ```
 
 ## Goals
@@ -204,7 +222,6 @@ MCP request
 
 ## Roadmap
 
-- Add Content-Length framing for MCP clients that require full MCP transport framing.
 - Add streaming command output for long-running operations.
 - Add optional native Nim library bindings after the subprocess wrapper stabilizes.
 - Expand structured parsers for each JSON output shape.

@@ -1,7 +1,9 @@
 import std/[json, os, osproc, streams, strutils, times]
 
 const ServerName = "nimux-mcp"
-const ServerVersion = "0.1.0"
+const ServerVersion = "0.2.0"
+
+var framedOutput = false
 
 type
   Risk = enum
@@ -35,6 +37,13 @@ type
     stdout: string
     stderr: string
     argv: seq[string]
+    durationMs: int
+    timedOut: bool
+
+  McpMessage = object
+    body: string
+    framed: bool
+    eof: bool
 
 proc `%`(s: seq[string]): JsonNode =
   result = newJArray()
@@ -74,6 +83,9 @@ proc getSeq(n: JsonNode; key: string): seq[string] =
       result.add(v.getStr)
   else:
     discard
+
+proc hasText(n: JsonNode; key: string): bool =
+  n.kind == JObject and n.hasKey(key) and n[key].kind == JString and n[key].getStr.len > 0
 
 proc prop(kind: string; desc = ""): JsonNode =
   result = %*{"type": kind}
@@ -182,7 +194,7 @@ proc riskAllowed(policy: Policy; risk: Risk; toolName: string): bool =
   of riskExecute:
     policy.allowRemoteExecution
   of riskSecrets:
-    policy.allowSecrets or (toolName == "nimux.secrets" and false)
+    policy.allowSecrets
   of riskDeploy:
     policy.allowSocksDeploy
   of riskCleanup:
@@ -222,26 +234,143 @@ proc redactText(s: string): string =
       redactedLines.add(line)
   redactedLines.join("\n")
 
+proc redactionKey(key: string): bool =
+  let low = key.toLowerAscii
+  for marker in [
+    "password", "passwd", "pwd", "hash", "nt_hash", "nthash", "aes", "aes_key",
+    "ticket", "ccache", "kirbi", "private_key", "pfx", "dpapi", "secret",
+    "cookie", "token", "authorization", "plain_password_hex"
+  ]:
+    if marker in low:
+      return true
+  false
+
+proc redactJson(n: JsonNode): JsonNode =
+  case n.kind
+  of JObject:
+    result = newJObject()
+    for k, v in n.pairs:
+      if redactionKey(k):
+        result[k] = %"<redacted>"
+      else:
+        result[k] = redactJson(v)
+  of JArray:
+    result = newJArray()
+    for item in n.items:
+      result.add(redactJson(item))
+  else:
+    result = n
+
+proc parseJsonOutput(s: string; redact: bool): JsonNode =
+  let stripped = s.strip
+  if stripped.len == 0:
+    return newJNull()
+  try:
+    result = parseJson(stripped)
+    if redact:
+      result = redactJson(result)
+    return
+  except CatchableError:
+    discard
+
+  result = newJArray()
+  for line in s.splitLines:
+    let item = line.strip
+    if item.len == 0:
+      continue
+    try:
+      var parsed = parseJson(item)
+      if redact:
+        parsed = redactJson(parsed)
+      result.add(parsed)
+    except CatchableError:
+      discard
+  if result.len == 0:
+    result = newJNull()
+
 proc nimuxBin(): string =
   let envBin = getEnv("NIMUX_BIN")
   if envBin.len > 0: envBin else: "nimux"
 
-proc runNimux(argv: seq[string]; timeoutMs = 120000): ExecResult =
+proc publicArgv(argv: seq[string]): seq[string] =
+  result = @[]
+  var skipNext = false
+  let sensitive = ["-p", "--password", "-H", "--hash", "--new-hash", "--cert", "--key", "--pfx"]
+  for a in argv:
+    if skipNext:
+      result.add("<redacted>")
+      skipNext = false
+    elif a in sensitive:
+      result.add(a)
+      skipNext = true
+    else:
+      result.add(a)
+
+proc writeJson(n: JsonNode; framed: bool) =
+  if n.kind == JNull:
+    return
+  let body = $n
+  if framed:
+    stdout.write("Content-Length: " & $body.len & "\r\n\r\n")
+    stdout.write(body)
+  else:
+    stdout.writeLine(body)
+  flushFile(stdout)
+
+proc emitProgress(token: string; message: string; progress: int) =
+  if token.len == 0:
+    return
+  writeJson(%*{
+    "jsonrpc": "2.0",
+    "method": "notifications/progress",
+    "params": {
+      "progressToken": token,
+      "progress": progress,
+      "message": message
+    }
+  }, framedOutput)
+
+proc emitLog(message: string) =
+  if not framedOutput:
+    return
+  writeJson(%*{
+    "jsonrpc": "2.0",
+    "method": "notifications/message",
+    "params": {
+      "level": "info",
+      "logger": ServerName,
+      "data": message
+    }
+  }, framedOutput)
+
+proc runNimux(argv: seq[string]; timeoutMs = 120000; progressToken = ""): ExecResult =
   result.argv = @[nimuxBin()] & argv
-  let p = startProcess(nimuxBin(), args = argv, options = {poUsePath, poStdErrToStdOut})
   let started = epochTime()
-  while p.running:
-    sleep(25)
+  emitProgress(progressToken, "starting nimux command", 0)
+  emitLog("starting " & publicArgv(result.argv).join(" "))
+  let p = startProcess(nimuxBin(), args = argv, options = {poUsePath, poStdErrToStdOut})
+  var lastProgress = started
+  while p.peekExitCode == -1:
+    sleep(50)
+    let nowTs = epochTime()
+    if progressToken.len > 0 and nowTs - lastProgress >= 5.0:
+      emitProgress(progressToken, "nimux command still running", int((nowTs - started) * 1000))
+      lastProgress = nowTs
     if int((epochTime() - started) * 1000) > timeoutMs:
       p.terminate()
       result.exitCode = -1
       result.stderr = "timeout"
+      result.timedOut = true
       result.stdout = p.outputStream.readAll()
+      result.durationMs = int((epochTime() - started) * 1000)
       p.close()
+      emitProgress(progressToken, "nimux command timed out", result.durationMs)
       return
   result.exitCode = p.waitForExit()
   result.stdout = p.outputStream.readAll()
+  result.durationMs = int((epochTime() - started) * 1000)
   p.close()
+  emitProgress(progressToken, "nimux command completed", result.durationMs)
 
 proc addAuth(argv: var seq[string]; args: JsonNode) =
   let user = getStr(args, "username", getStr(args, "user"))
@@ -387,29 +516,20 @@ proc findTool(name: string): ToolDef =
       return t
   raise newException(ValueError, "unknown tool: " & name)
 
-proc publicArgv(argv: seq[string]): seq[string] =
-  result = @[]
-  var skipNext = false
-  let sensitive = ["-p", "--password", "-H", "--hash", "--new-hash", "--cert", "--key", "--pfx"]
-  for i, a in argv:
-    if skipNext:
-      result.add("<redacted>")
-      skipNext = false
-    elif a in sensitive:
-      result.add(a)
-      skipNext = true
-    else:
-      result.add(a)
-
 proc runWrapped(argv: seq[string]; args: JsonNode; policy: Policy): JsonNode =
   let timeout = getInt(args, "timeout_ms", 120000)
-  let r = runNimux(argv, timeout)
-  let outText = if policy.redact or getBool(args, "redact", true): redactText(r.stdout) else: r.stdout
+  let shouldRedact = policy.redact or getBool(args, "redact", true)
+  let r = runNimux(argv, timeout, getStr(args, "progress_token"))
+  let outText = if shouldRedact: redactText(r.stdout) else: r.stdout
+  let parsed = parseJsonOutput(r.stdout, shouldRedact)
   %*{
     "exit_code": r.exitCode,
     "argv": publicArgv(r.argv),
     "stdout": outText,
-    "stderr": r.stderr
+    "stderr": r.stderr,
+    "duration_ms": r.durationMs,
+    "timed_out": r.timedOut,
+    "json": parsed
   }
 
 proc requireTarget(policy: Policy; target: string) =
@@ -714,24 +834,58 @@ proc handle(req: JsonNode; policy: Policy): JsonNode =
   except CatchableError as e:
     return errorResponse(id, -32000, e.msg)
 
-when isMainModule:
-  let policy = loadPolicy()
+proc parseContentLength(line: string): int =
+  let idx = line.find(":")
+  if idx < 0:
+    raise newException(ValueError, "invalid Content-Length header")
+  parseInt(line[idx + 1 .. ^1].strip)
+
+proc readMessage(): McpMessage =
+  var line: string
   while true:
-    var line: string
     try:
       line = stdin.readLine()
     except EOFError:
-      break
+      result.eof = true
+      return
     if line.strip.len == 0:
+      continue
+    break
+
+  if line.toLowerAscii.startsWith("content-length:"):
+    var contentLength = parseContentLength(line)
+    while true:
+      let h = stdin.readLine()
+      if h.strip.len == 0:
+        break
+      if h.toLowerAscii.startsWith("content-length:"):
+        contentLength = parseContentLength(h)
+    var body = newString(contentLength)
+    let got =
+      if contentLength > 0:
+        stdin.readChars(toOpenArray(body, 0, contentLength - 1))
+      else:
+        0
+    if got < contentLength:
+      body.setLen(got)
+    return McpMessage(body: body, framed: true, eof: false)
+
+  McpMessage(body: line, framed: false, eof: false)
+
+when isMainModule:
+  let policy = loadPolicy()
+  while true:
+    let msg = readMessage()
+    if msg.eof:
+      break
+    framedOutput = msg.framed
+    if msg.body.strip.len == 0:
       continue
     var req: JsonNode
     try:
-      req = parseJson(line)
+      req = parseJson(msg.body)
     except CatchableError as e:
-      echo $errorResponse(newJNull(), -32700, "parse error: " & e.msg)
-      flushFile(stdout)
+      writeJson(errorResponse(newJNull(), -32700, "parse error: " & e.msg), framedOutput)
       continue
     let resp = handle(req, policy)
-    if resp.kind != JNull:
-      echo $resp
-      flushFile(stdout)
+    writeJson(resp, framedOutput)

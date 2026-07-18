@@ -12,6 +12,8 @@ It keeps the main `nimux` binary independent and calls it as a subprocess. The M
 - pivot metadata tracking
 - JSON-oriented responses
 
+It supports both MCP `Content-Length` framing and newline-delimited JSON-RPC. Newline mode is useful for quick terminal tests. MCP clients should use framed messages.
+
 ## Build
 
 ```bash
@@ -27,7 +29,14 @@ NIMUX_MCP_POLICY=./policy.example.json \
 ./nimux_mcp
 ```
 
-The server reads newline-delimited JSON-RPC messages from stdin and writes JSON-RPC responses to stdout.
+The server reads JSON-RPC messages from stdin and writes JSON-RPC responses to stdout.
+
+Supported transports:
+
+```text
+Content-Length framed JSON-RPC
+newline-delimited JSON-RPC for local smoke tests
+```
 
 ## Environment
 
@@ -35,6 +44,40 @@ The server reads newline-delimited JSON-RPC messages from stdin and writes JSON-
 NIMUX_BIN          Path to nimux. Defaults to nimux in PATH.
 NIMUX_MCP_POLICY   JSON policy file. Optional.
 NIMUX_MCP_STATE    Pivot state JSON file. Defaults to a temp file.
+```
+
+## MCP Client Config
+
+Example Claude Desktop style config:
+
+```json
+{
+  "mcpServers": {
+    "nimux": {
+      "command": "/path/to/integrations/mcp/nimux-mcp/nimux_mcp",
+      "env": {
+        "NIMUX_BIN": "/usr/local/bin/nimux",
+        "NIMUX_MCP_POLICY": "/path/to/policy.json"
+      }
+    }
+  }
+}
+```
+
+Example local development config:
+
+```json
+{
+  "mcpServers": {
+    "nimux-dev": {
+      "command": "/home/katana/nim/integrations/mcp/nimux-mcp/nimux_mcp",
+      "env": {
+        "NIMUX_BIN": "/home/katana/nim/nimux",
+        "NIMUX_MCP_POLICY": "/home/katana/nim/integrations/mcp/nimux-mcp/policy.example.json"
+      }
+    }
+  }
+}
 ```
 
 ## Supported Tools
@@ -76,7 +119,17 @@ Write and execution tools require `approval_id` when `require_approval` is true.
 
 ## Example tools/list
 
+Newline test:
+
 ```json
+{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
+```
+
+Framed MCP request:
+
+```text
+Content-Length: 67
+
 {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}
 ```
 
@@ -85,6 +138,8 @@ Write and execution tools require `approval_id` when `require_approval` is true.
 ```json
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nimux.scan","arguments":{"target":"dc01.corp.local","ports":"445,389,5985","open_only":true}}}
 ```
+
+For MCP clients that support progress tokens, pass `progress_token` in `arguments`. The wrapper emits `notifications/progress` before command start, while long commands continue, and when commands complete.
 
 ## Example pivot flow
 
@@ -108,3 +163,18 @@ Cleanup:
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nimux.socks_cleanup","arguments":{"pivot_id":"pivot-123","username":"administrator","password":"<password>","domain":"corp.local","approval_id":"approved-002"}}}
 ```
 
+## Response Shape
+
+Command wrappers return a text MCP content block containing JSON with:
+
+```text
+exit_code
+argv
+stdout
+stderr
+duration_ms
+timed_out
+json
+```
+
+`json` contains parsed JSON output when `nimux` emitted JSON or JSONL. Sensitive keys and sensitive text lines are redacted by default.
