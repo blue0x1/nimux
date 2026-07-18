@@ -31,9 +31,48 @@ https://docs.nimux.wiki
 
 # AI Integrations
 
-Agent guidance and an MCP integration plan are available in `SKILLS.md` and `integrations/`.
+Agent guidance and MCP integration files are available in `SKILLS.md` and `integrations/`.
 
 The core `nimux` binary remains independent. AI integrations should call `nimux` as the native execution engine, prefer `--json`, use `--dry-run` before supported writes, and require explicit approval for execution or changes.
+
+## MCP Wrapper
+
+`nimux-mcp` is a separate MCP stdio wrapper for AI clients.
+
+Location:
+
+```text
+integrations/mcp/nimux-mcp
+```
+
+Build:
+
+```bash
+cd integrations/mcp/nimux-mcp
+nimble build -y
+```
+
+Example MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "nimux": {
+      "command": "/path/to/nimux/integrations/mcp/nimux-mcp/nimux_mcp",
+      "env": {
+        "NIMUX_BIN": "/usr/local/bin/nimux",
+        "NIMUX_MCP_POLICY": "/path/to/policy.json"
+      }
+    }
+  }
+}
+```
+
+The wrapper supports MCP `Content-Length` framed JSON-RPC, local newline-delimited JSON-RPC tests, policy checks, approval gates, redaction, progress notifications, and SOCKS pivot metadata.
+
+Read more:
+
+https://docs.nimux.wiki/mcp-integration
 
 # Installation
 
