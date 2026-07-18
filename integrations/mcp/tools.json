@@ -1,0 +1,137 @@
+{
+  "name": "nimux-mcp",
+  "description": "Proposed MCP tool surface for nimux.",
+  "tools": [
+    {
+      "name": "nimux.scan",
+      "risk": "read",
+      "description": "Run a TCP or UDP scan with JSON output.",
+      "required": ["target"],
+      "options": ["ports", "udp", "open_only", "proxy", "timeout_ms"]
+    },
+    {
+      "name": "nimux.smb_enum",
+      "risk": "read",
+      "description": "Run SMB enumeration against an authorized target.",
+      "required": ["target"],
+      "options": ["auth_ref", "shares", "users", "groups", "sessions", "pass_policy", "proxy"]
+    },
+    {
+      "name": "nimux.ldap_query",
+      "risk": "read",
+      "description": "Run named LDAP queries or a raw LDAP filter.",
+      "required": ["dc", "domain"],
+      "options": ["auth_ref", "queries", "filter", "attrs", "bloodhound_out", "proxy"]
+    },
+    {
+      "name": "nimux.kerberos_request",
+      "risk": "read",
+      "description": "Request or inspect Kerberos tickets.",
+      "required": ["kdc", "domain", "request"],
+      "options": ["auth_ref", "ccache", "spn", "service", "user", "out", "krb5_config"]
+    },
+    {
+      "name": "nimux.winrm_command",
+      "risk": "execute",
+      "description": "Run a WinRM command after explicit approval.",
+      "required": ["target", "command", "approval_id"],
+      "options": ["auth_ref", "domain", "ccache", "krb5_config", "spn", "ssl", "proxy"]
+    },
+    {
+      "name": "nimux.gpo_dry_run",
+      "risk": "write-preview",
+      "description": "Preview a GPO operation with dry-run.",
+      "required": ["dc", "domain", "operation"],
+      "options": ["auth_ref", "name", "target_dn", "principal", "rights"]
+    },
+    {
+      "name": "nimux.gpo_apply",
+      "risk": "write",
+      "description": "Apply an approved GPO operation with rollback output.",
+      "required": ["dc", "domain", "operation", "approval_id", "rollback_out"],
+      "options": ["auth_ref", "name", "target_dn", "principal", "rights", "local_file", "remote_path"]
+    },
+    {
+      "name": "nimux.socks_deploy",
+      "risk": "deploy",
+      "description": "Deploy the native nimux SOCKS helper as a background pivot after explicit approval.",
+      "required": ["target", "listener", "approval_id"],
+      "options": ["auth_ref", "domain", "socks_port", "control_port", "kerberos", "proxy", "reverse"],
+      "returns": ["pivot_id", "local_proxy_url", "pid", "socks_task", "remote_helper_path"]
+    },
+    {
+      "name": "nimux.socks_status",
+      "risk": "read",
+      "description": "Return stored metadata for a running nimux SOCKS pivot.",
+      "required": ["pivot_id"],
+      "options": ["check_connectivity"],
+      "returns": ["pivot_id", "target", "local_proxy_url", "pid", "socks_task", "remote_helper_path", "state"]
+    },
+    {
+      "name": "nimux.socks_cleanup",
+      "risk": "cleanup",
+      "description": "Cleanup a previously deployed nimux SOCKS pivot helper.",
+      "required": ["pivot_id", "approval_id"],
+      "options": ["auth_ref", "domain"],
+      "returns": ["pivot_id", "cleaned", "message"]
+    },
+    {
+      "name": "nimux.proxy_scan",
+      "risk": "read",
+      "description": "Run nimux scan through a stored pivot by resolving pivot_id to --proxy.",
+      "required": ["pivot_id", "target"],
+      "options": ["ports", "udp", "open_only", "timeout_ms"],
+      "returns": ["target", "proxy", "results"]
+    },
+    {
+      "name": "nimux.proxy_command",
+      "risk": "execute",
+      "description": "Run an approved nimux command family through a stored pivot with --proxy.",
+      "required": ["pivot_id", "command_family", "target", "approval_id"],
+      "options": ["auth_ref", "domain", "arguments"],
+      "returns": ["target", "proxy", "command_family", "result"]
+    },
+    {
+      "name": "nimux.report_summary",
+      "risk": "read",
+      "description": "Summarize JSONL evidence and redact sensitive values.",
+      "required": ["evidence_files"],
+      "options": ["format", "redact"]
+    },
+    {
+      "name": "nimux.file_operation",
+      "risk": "write",
+      "description": "Run an approved SMB file operation using put, get, ls, mkdir, or rm.",
+      "required": ["operation", "target", "share"],
+      "options": ["auth_ref", "domain", "local_path", "remote_path", "proxy", "approval_id"]
+    },
+    {
+      "name": "nimux.database_query",
+      "risk": "read",
+      "description": "Run an approved database query through mssql, postgres, or mysql.",
+      "required": ["db_type", "target", "query"],
+      "options": ["auth_ref", "domain", "database", "proxy"]
+    },
+    {
+      "name": "nimux.remote_exec",
+      "risk": "execute",
+      "description": "Run an approved remote execution action through winrm, scm, bin, cim, tsch, mmc, ssh, mssql, or postgres.",
+      "required": ["method", "target", "command", "approval_id"],
+      "options": ["auth_ref", "domain", "ccache", "krb5_config", "proxy"]
+    },
+    {
+      "name": "nimux.secrets",
+      "risk": "secrets",
+      "description": "Run an approved secrets collection or DCSync workflow with redaction enabled by default.",
+      "required": ["operation", "target", "approval_id"],
+      "options": ["auth_ref", "domain", "user", "trust_keys", "proxy", "redact"]
+    },
+    {
+      "name": "nimux.protocol_probe",
+      "risk": "read",
+      "description": "Run a read-only protocol probe for http, rdp, ftp, vnc, nfs, afp, webdav, ssh, mysql, postgres, or mssql.",
+      "required": ["protocol", "target"],
+      "options": ["auth_ref", "port", "domain", "proxy", "json"]
+    }
+  ]
+}

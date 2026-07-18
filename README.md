@@ -29,6 +29,12 @@ Usage examples, command references, and workflow notes are maintained in the doc
 
 https://docs.nimux.wiki
 
+# AI Integrations
+
+Agent guidance and an MCP integration plan are available in `SKILLS.md` and `integrations/`.
+
+The core `nimux` binary remains independent. AI integrations should call `nimux` as the native execution engine, prefer `--json`, use `--dry-run` before supported writes, and require explicit approval for execution or changes.
+
 # Installation
 
 ## Nimble
