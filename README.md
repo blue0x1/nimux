@@ -115,7 +115,7 @@ Run a scan:
 
 ```bash
 docker run --rm -it --network host ghcr.io/blue0x1/nimux:latest \
-  scan 10.10.10.0/24 --ports 445,389,5985 --open
+  scan 10.10.10.0/24 --port 445,389,5985 --open
 ```
 
 Run the MCP wrapper:
@@ -123,6 +123,26 @@ Run the MCP wrapper:
 ```bash
 docker run --rm -i --network host --entrypoint nimux_mcp \
   ghcr.io/blue0x1/nimux:latest
+```
+
+## Arch Linux AUR
+
+nimux is available on the AUR:
+
+https://aur.archlinux.org/packages/nimux
+
+Install with an AUR helper:
+
+```bash
+yay -S nimux
+```
+
+Or build manually:
+
+```bash
+git clone https://aur.archlinux.org/nimux.git
+cd nimux
+makepkg -si
 ```
 
 ## Build From Source
@@ -152,11 +172,11 @@ sudo apt install ../nimux_*.deb
 # Quick Examples
 
 ```bash
-nimux scan 10.10.10.0/24 --ports 445,389,5985 --open
+nimux scan 10.10.10.0/24 --port 445,389,5985 --open
 nimux smb dc01.corp.local -u operator -H <nt_hash> -d corp.local --shares --users
 nimux winrm host.corp.local -u operator -p '<password>' -d corp.local --cmd whoami
 nimux kerberos dc01.corp.local -u operator -p '<password>' -d corp.local --request kinit --out operator.ccache
-nimux scan 10.10.10.0/24 --ports 445,389,5985 --proxy socks5://127.0.0.1:1080
+nimux scan 10.10.10.0/24 --port 445,389,5985 --proxy socks5://127.0.0.1:1080
 ```
 
 # Features
