@@ -145,6 +145,14 @@ cd nimux
 makepkg -si
 ```
 
+## BlackArch
+
+nimux is available in BlackArch:
+
+```bash
+sudo pacman -S nimux
+```
+
 ## Build From Source
 
 ```bash
