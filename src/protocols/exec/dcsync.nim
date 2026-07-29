@@ -217,6 +217,9 @@ proc kerberosTypeName*(t: uint32): string =
   of 3:          "des-cbc-md5"
   of 17:         "aes128-cts-hmac-sha1-96"
   of 18:         "aes256-cts-hmac-sha1-96"
+  of 19:         "0x13"
+  of 20:         "0x14"
+  of 23:         "0x17"
   of 0xffffff74'u32: "rc4_hmac"
   else:          "etype-" & $t
 
@@ -504,6 +507,35 @@ proc enumerateAllUsers(host: string; timeoutMs: int; username, password,
               else: ""
     if sam.len > 0 and sid.len > 0:
       result.add (samName: sam, sid: sid)
+  if result.len > 0:
+    return
+
+  let cred = smb.SmbCredential(
+    username: username,
+    password: password,
+    ntlmHash: ntlmHash,
+    domain: domain
+  )
+  let probe = await smb.probeSmb(host, 445, timeoutMs,
+    smb.defaultSmbNegotiateRequest(), cred, true,
+    smb.SmbEnumRequests(users: true))
+  if not probe.authenticated or not probe.domainUsers.succeeded:
+    return
+  var domainSid = ""
+  for d in probe.domains:
+    if d.name.toLowerAscii() == "builtin":
+      continue
+    if d.sid.len > 0:
+      domainSid = d.sid
+      break
+  if domainSid.len == 0:
+    return
+  for u in probe.domainUsers.entries:
+    if u.name.len == 0 or u.rid == 0:
+      continue
+    let sid = sidFromString(domainSid & "-" & $u.rid)
+    if sid.len > 0:
+      result.add (samName: u.name, sid: sid)
 
 proc discoverReplicaGuid(host: string; timeoutMs: int; username, password,
                          ntlmHash, domain: string;

