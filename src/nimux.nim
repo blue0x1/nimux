@@ -32,7 +32,7 @@ import protocols/postgres/client as pgclient
 import protocols/http/client as httpclient
 import protocols/nfs/client as nfsclient
 
-const Version = "1.0.2"
+const Version = "1.0.3"
 const Author = "Chokri Hammedi (blue0x1)"
 const FileAttributeReparsePoint = 0x00000400'u32
 
@@ -194,6 +194,10 @@ type
     dcomObject: string
     secretsFull: bool
     secretsOnline: bool
+    secretsBackupHives: bool
+    secretsSamPath: string
+    secretsSecurityPath: string
+    secretsSystemPath: string
     secretsExecMethod: string
     dcSyncTrustKeys: bool
     addComputer: bool
@@ -1447,6 +1451,7 @@ nimux secrets - Dump SAM hashes, LSA secrets, cached creds, domain backup key an
 USAGE
   nimux secrets <target> -u <user> {-p <pass>|-H <hash>} [-d <domain>] [options]
   nimux secrets <target> -k [-u <user>] [-d <domain>] [options]
+  nimux secrets <target|LOCAL> --sam <SAM.save> --security <SECURITY.save> --system <SYSTEM.save> [-d <domain>]
 
 AUTHENTICATION
   -u, --username <s>   Username (local or domain admin)
@@ -1458,6 +1463,12 @@ AUTHENTICATION
 PROTOCOL TUNING
   --port <n>           SMB port (default 445)
   --timeout <ms>       Per-operation timeout (default 10000)
+  --backup-hives       Only save HKLM\SAM, HKLM\SYSTEM and HKLM\SECURITY remotely
+  --remote <path>      Remote output directory for --backup-hives
+                       (default: C:\Windows\Temp)
+  --sam <file>         Offline SAM hive path
+  --security <file>    Offline SECURITY hive path
+  --system <file>      Offline SYSTEM hive path
 
 OUTPUT
   --json               Emit JSON
@@ -1487,6 +1498,8 @@ EXAMPLES
   nimux secrets 192.168.1.10 -u Administrator -p Password123
   nimux secrets dc01.corp.local -u CORP\\admin -H <nthash> -d corp.local
   KRB5CCNAME=admin.ccache nimux secrets dc01.corp.local -k -u Administrator -d CORP
+  KRB5CCNAME=admin.ccache nimux secrets dc01.corp.local -k -u Administrator -d CORP --backup-hives --remote 'C:\Windows\Temp' --json
+  nimux secrets dc01.corp.local --sam SAM.save --security SECURITY.save --system SYSTEM.save -d corp.local
   nimux secrets dc01.corp.local -u Administrator -H <nthash> -d corp.local --online
   nimux secrets dc01.corp.local -u Administrator -H <nthash> -d corp.local --online --exec svc
 """
@@ -2042,6 +2055,7 @@ proc parseCli(): CliConfig =
     "group", "member", "shadow-out",
     "object-type", "inherited-object-type", "ace-flags", "top-ports", "T",
     "share", "remote", "local", "object", "put", "get",
+    "sam", "security", "system",
     "add-computer", "computer", "computer-pass", "computer-ou", "ou",
     "computer-dns", "delegate-from", "delegate-to", "restore-to", "new-name", "move-to",
     "bloodhound-out", "ca", "template", "out", "pfx", "upn", "dns-name",
@@ -2301,6 +2315,18 @@ proc parseCli(): CliConfig =
       of "online":
         if result.protocol == "secrets":
           result.secretsOnline = true
+      of "backup-hives":
+        if result.protocol == "secrets":
+          result.secretsBackupHives = true
+      of "sam":
+        if result.protocol == "secrets":
+          result.secretsSamPath = value
+      of "security":
+        if result.protocol == "secrets":
+          result.secretsSecurityPath = value
+      of "system":
+        if result.protocol == "secrets":
+          result.secretsSystemPath = value
       of "ssl":
         result.useSsl = true
       of "trust-keys":
@@ -9144,13 +9170,45 @@ proc dcSyncProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.}
   }
 
 proc secretsProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
-  var r = await secretsmod.dumpSecrets(host, config.port,
-    max(config.timeoutMs, 10000),
-    config.username, config.password, config.ntlmHash, config.domain,
-    config.secretsFull, kerberos = config.kerberos,
-    ccache = config.ccachePath, krb5Config = config.krb5ConfigPath)
+  if config.secretsBackupHives:
+    let backup = await secretsmod.backupHives(host, config.port,
+      max(config.timeoutMs, 10000),
+      config.username, config.password, config.ntlmHash, config.domain,
+      config.remotePath, kerberos = config.kerberos,
+      ccache = config.ccachePath, krb5Config = config.krb5ConfigPath)
+    var savedArr = newJArray()
+    for item in backup.saved:
+      savedArr.add %*{
+        "hive": item.hive,
+        "remote_path": item.remotePath,
+        "status": "0x" & item.status.toHex(8)
+      }
+    return %*{
+      "protocol": "secrets",
+      "operation": "backup_hives",
+      "host": host,
+      "port": backup.port,
+      "authenticated": backup.authenticated,
+      "saved_hives": savedArr,
+      "success": backup.success,
+      "message": backup.message,
+      "error": backup.error
+    }
+
+  let offlineMode = config.secretsSamPath.len > 0 or
+    config.secretsSecurityPath.len > 0 or config.secretsSystemPath.len > 0
+  var r =
+    if offlineMode:
+      secretsmod.parseOfflineHives(config.secretsSamPath, config.secretsSecurityPath,
+        config.secretsSystemPath, host, config.domain)
+    else:
+      await secretsmod.dumpSecrets(host, config.port,
+        max(config.timeoutMs, 10000),
+        config.username, config.password, config.ntlmHash, config.domain,
+        config.secretsFull, kerberos = config.kerberos,
+        ccache = config.ccachePath, krb5Config = config.krb5ConfigPath)
   let dc =
-    if config.domain.len > 0:
+    if config.domain.len > 0 and not offlineMode:
       try:
         await dcsyncmod.dcSync(host, config.port,
           max(config.timeoutMs, 10000),
@@ -9334,7 +9392,8 @@ proc secretsProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.
                   "changed": g.changed, "disabled": g.disabled}
   return %*{
     "protocol": "secrets",
-    "host": host,
+    "operation": if offlineMode: "offline_hives" else: "dump",
+    "host": r.host,
     "port": r.port,
     "authenticated": r.authenticated,
     "boot_key": r.bootKey,
@@ -11790,7 +11849,8 @@ proc renderProtocolLine(node: JsonNode): string =
           let line = item.getStr()
           if line.startsWith("[*]"):
             continue
-          if line.contains(":aes") or line.contains(":des-") or line.contains(":rc4"):
+          if line.contains(":aes") or line.contains(":des-") or
+              line.contains(":rc4") or line.contains(":0x"):
             kerberosLines.add line
           elif line.contains(":") and line.endsWith(":::"):
             continue
