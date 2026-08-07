@@ -4089,6 +4089,11 @@ proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: str
                           acesByDn: Table[string, JsonNode]): JsonNode =
   var root = outPath
   let wantZip = outPath.toLowerAscii().endsWith(".zip")
+  let zipPath =
+    if wantZip:
+      if outPath.isAbsolute: outPath else: getCurrentDir() / outPath
+    else:
+      ""
   if wantZip:
     root = getTempDir() / ("nimux-bh-" & $getCurrentProcessId())
   createDir(root)
@@ -4141,12 +4146,16 @@ proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: str
   result = %*{"path": root, "files": written, "zipped": false,
     "validation": validation, "valid": valid}
   if wantZip:
-    let cmd = "cd " & quoteShell(root) & " && zip -q -j " & quoteShell(outPath) & " *.json"
+    let parent = parentDir(zipPath)
+    if parent.len > 0:
+      createDir(parent)
+    let cmd = "cd " & quoteShell(root) & " && zip -q -j " & quoteShell(zipPath) & " *.json"
     let zipped = execCmdEx(cmd)
-    result["zip"] = %outPath
+    result["zip"] = %zipPath
     result["zipped"] = %(zipped.exitCode == 0)
     if zipped.exitCode != 0:
       result["zip_error"] = %zipped.output
+    result["valid"] = %(valid and zipped.exitCode == 0)
 
 proc bloodhoundPrincipalTypes(domainSid: string;
                               users, groups, computers: seq[ldapclient.LdapEntry]):
@@ -8129,6 +8138,7 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
     result["credential"] = %(config.username & ":" & config.password)
   if config.ldapBloodhound:
     result["operation"] = %"bloodhound"
+    result["success"] = %(probe.speaksLdap and (not probe.authAttempted or probe.authenticated))
     result["bloodhound"] = %*{
       "meta": {
         "type": "nimux-bloodhound",
@@ -8160,6 +8170,12 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
         probe.domainSid, probe.domainFunctionality,
         probe.users, probe.groups, probe.computers, probe.trusts, probe.gpos,
         acesByDn)
+      result["success"] = %(result["success"].getBool() and
+        result["bloodhound_output"]{"valid"}.getBool() and
+        (not result["bloodhound_output"]{"zipped"}.getBool(false) or
+          result["bloodhound_output"]{"zip"}.getStr().len > 0))
+      if result["success"].getBool():
+        result["message"] = %"bloodhound collection ok"
   if config.ldapCountKind.len > 0:
     let key = case config.ldapCountKind
       of "users": "users"
@@ -9920,6 +9936,39 @@ proc renderProtocolLine(node: JsonNode): string =
           if node{"authenticated"}.getBool(): green("ok") else: red("fail"))
       if node{"operation"}.getStr().len > 0:
         result.add "\n" & kv("operation", bold(node{"operation"}.getStr()))
+      if node{"operation"}.getStr() == "bloodhound":
+        let bh = node{"bloodhound"}
+        if node{"default_naming_context"}.getStr().len > 0:
+          result.add "\n" & kv("base dn", brightCyan(node{"default_naming_context"}.getStr()))
+        if node{"domain_sid"}.getStr().len > 0:
+          result.add "\n" & kv("domain sid", dim(node{"domain_sid"}.getStr()))
+        if bh != nil and bh.kind == JObject:
+          result.add "\n" & kv("users", $bh{"users"}.len)
+          result.add "\n" & kv("groups", $bh{"groups"}.len)
+          result.add "\n" & kv("computers", $bh{"computers"}.len)
+          result.add "\n" & kv("gpos", $bh{"gpos"}.len)
+          result.add "\n" & kv("trusts", $bh{"trusts"}.len)
+        let output = node{"bloodhound_output"}
+        if output != nil and output.kind == JObject:
+          if output{"zip"}.getStr().len > 0:
+            let zipOk = output{"valid"}.getBool() and output{"zipped"}.getBool()
+            result.add "\n" & kv("zip", (if zipOk: brightGreen(output{"zip"}.getStr()) else: red(output{"zip"}.getStr())))
+          elif output{"path"}.getStr().len > 0:
+            result.add "\n" & kv("path", brightGreen(output{"path"}.getStr()))
+          result.add "\n" & kv("files", $output{"files"}.len)
+          if output.hasKey("validation"):
+            var invalid = 0
+            for item in output["validation"]:
+              if not item{"valid"}.getBool():
+                inc invalid
+            result.add "\n" & kv("validation", if invalid == 0: green("ok") else: red($invalid & " invalid"))
+          if output{"zip_error"}.getStr().len > 0:
+            result.add "\n" & kv("zip error", red(output{"zip_error"}.getStr()))
+        result.add "\n" & kv("status", if ok: green("ok") else: red("failed"))
+        if node{"message"}.getStr().len > 0:
+          result.add "\n" & kv("message", node{"message"}.getStr())
+        result.add "\n" & bottomBorder()
+        return
       if node{"operation"}.getStr() == "adcs":
         let cas = node{"cas"}
         let tmpl = node{"templates"}
