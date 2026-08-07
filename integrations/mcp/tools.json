@@ -21,7 +21,7 @@
       "risk": "read",
       "description": "Run named LDAP queries or a raw LDAP filter.",
       "required": ["dc", "domain"],
-      "options": ["auth_ref", "queries", "filter", "attrs", "bloodhound_out", "proxy"]
+      "options": ["auth_ref", "queries", "filter", "attrs", "bloodhound_out", "bloodhound_legacy", "proxy"]
     },
     {
       "name": "nimux.kerberos_request",

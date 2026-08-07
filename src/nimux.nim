@@ -318,6 +318,7 @@ type
     ldapMoveTo: string
     ldapBloodhound: bool
     ldapBloodhoundOut: string
+    ldapBloodhoundLegacy: bool
     ldapOpsecNotes: bool
     proxySpec: string
     shellMode2: bool
@@ -554,6 +555,7 @@ AUTHENTICATION
 QUERY
   --query <name>       users, computers, groups, trusts, admins, asreproast, kerberoast, gpos, schema, config, fgpp, deleted, locked, expired-passwords, stale-users, never-logged-on, sites, subnets, dcs, dns, certs, nested-groups, acl, unconstrained, constrained, rbcd-targets, passwd-notreqd, dont-expire, admincount
   --bloodhound         Collect users/groups/computers/trusts/GPOs/DCs/admins as one JSON bundle
+  --legacy             With --bloodhound, write BloodHound Legacy 4.x-compatible JSON/ZIP
   --opsec-notes        Show common Windows event/log artifacts for LDAP/ADCS/GPO actions
   --base <dn>          Search base for --filter custom LDAP queries
   --filter <filter>    Raw LDAP filter, e.g. "(objectClass=user)"
@@ -2125,7 +2127,7 @@ proc parseCli(): CliConfig =
       "deny", "allow", "exact", "ls", "no-bump", "dry-run", "adcs", "startup", "schtask", "create-gpo", "delegate",
       "adcs-request", "adcs-auth", "adcs-rpc", "cert-inventory", "cert-map", "remove-map", "opsec-notes", "decrypt-mslaps",
       "get-gmsa", "dns-add", "dns-delete", "dns-replace", "adcs-template",
-      "add-member", "remove-member", "restore-deleted", "move", "bloodhound", "recursive", "full", "trust-keys",
+      "add-member", "remove-member", "restore-deleted", "move", "bloodhound", "legacy", "recursive", "full", "trust-keys",
       "lockout-aware", "schannel", "reverse",
       "user-process",
       "enum-danger", "enum-impersonate", "enable-xp", "enable-ole", "enable-clr",
@@ -2784,6 +2786,8 @@ proc parseCli(): CliConfig =
       of "bloodhound-out":
         result.ldapBloodhound = true
         result.ldapBloodhoundOut = value
+      of "legacy":
+        result.ldapBloodhoundLegacy = true
       of "opsec-notes":
         result.ldapOpsecNotes = true
       of "include-deleted":
@@ -4045,6 +4049,85 @@ proc bloodhoundTrustNode(entry: ldapclient.LdapEntry; domainName: string): JsonN
 proc bloodhoundFileJson(kind: string; data: JsonNode): JsonNode =
   %*{"data": data, "meta": {"methods": 0, "type": kind, "count": data.len, "version": 6}}
 
+proc bloodhoundLegacyFileJson(kind: string; data: JsonNode): JsonNode =
+  %*{"data": data, "meta": {"methods": 0, "type": kind, "count": data.len, "version": 4}}
+
+proc bloodhoundRef(entry: ldapclient.LdapEntry; objectType: string): JsonNode =
+  %*{
+    "ObjectIdentifier": bloodhoundObjectId(entry, entry.dn),
+    "ObjectType": objectType
+  }
+
+proc bloodhoundDnRefs(users, groups, computers, gpos: seq[ldapclient.LdapEntry]):
+                       Table[string, JsonNode] =
+  for entry in users:
+    result[dnKey(entry.dn)] = bloodhoundRef(entry, "User")
+  for entry in groups:
+    result[dnKey(entry.dn)] = bloodhoundRef(entry, "Group")
+  for entry in computers:
+    result[dnKey(entry.dn)] = bloodhoundRef(entry, "Computer")
+  for entry in gpos:
+    result[dnKey(entry.dn)] = bloodhoundRef(entry, "GPO")
+
+proc bloodhoundGroupMembers(users, groups, computers: seq[ldapclient.LdapEntry];
+                            refsByDn: Table[string, JsonNode]):
+                            Table[string, JsonNode] =
+  var membersByDn: Table[string, JsonNode]
+
+  proc addMember(groupDn: string; memberRef: JsonNode) =
+    if groupDn.len == 0 or memberRef == nil:
+      return
+    let key = dnKey(groupDn)
+    if key notin membersByDn:
+      membersByDn[key] = newJArray()
+    let oid = memberRef{"ObjectIdentifier"}.getStr()
+    var exists = false
+    for item in membersByDn[key]:
+      if item{"ObjectIdentifier"}.getStr() == oid:
+        exists = true
+        break
+    if not exists:
+      membersByDn[key].add memberRef
+
+  for entry in users:
+    let entryKey = dnKey(entry.dn)
+    if entryKey in refsByDn:
+      for groupDn in attrVals(entry, "memberOf"):
+        addMember(groupDn, refsByDn[entryKey])
+  for entry in computers:
+    let entryKey = dnKey(entry.dn)
+    if entryKey in refsByDn:
+      for groupDn in attrVals(entry, "memberOf"):
+        addMember(groupDn, refsByDn[entryKey])
+  for entry in groups:
+    let entryKey = dnKey(entry.dn)
+    if entryKey in refsByDn:
+      for groupDn in attrVals(entry, "memberOf"):
+        addMember(groupDn, refsByDn[entryKey])
+    for memberDn in attrVals(entry, "member"):
+      let memberKey = dnKey(memberDn)
+      if memberKey in refsByDn:
+        addMember(entry.dn, refsByDn[memberKey])
+  result = membersByDn
+
+proc applyBloodhoundLegacyNodeFixups(node: JsonNode; kind: string;
+                                     entry: ldapclient.LdapEntry;
+                                     refsByDn: Table[string, JsonNode];
+                                     groupMembersByDn: Table[string, JsonNode]) =
+  case kind
+  of "users":
+    node["AllowedToDelegate"] = newJArray()
+    node["SPNTargets"] = newJArray()
+  of "groups":
+    let key = dnKey(entry.dn)
+    node["Members"] =
+      if key in groupMembersByDn: groupMembersByDn[key]
+      else: newJArray()
+  of "computers":
+    node["AllowedToDelegate"] = newJArray()
+  else:
+    discard
+
 proc validateBloodhoundFileJson(path, expectedKind: string; doc: JsonNode): JsonNode =
   var errors = newJArray()
   proc addError(message: string) =
@@ -4086,7 +4169,8 @@ proc validateBloodhoundFileJson(path, expectedKind: string; doc: JsonNode): Json
 
 proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: string;
                           users, groups, computers, trusts, gpos: seq[ldapclient.LdapEntry];
-                          acesByDn: Table[string, JsonNode]): JsonNode =
+                          acesByDn: Table[string, JsonNode];
+                          legacy = false): JsonNode =
   var root = outPath
   let wantZip = outPath.toLowerAscii().endsWith(".zip")
   let zipPath =
@@ -4112,25 +4196,55 @@ proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: str
     "ChildObjects": [],
     "Trusts": []
   }
+  let refsByDn = bloodhoundDnRefs(users, groups, computers, gpos)
+  let groupMembersByDn = bloodhoundGroupMembers(users, groups, computers, refsByDn)
   var usersData = newJArray()
-  for entry in users: usersData.add bloodhoundNode(entry, "users", domainName, acesByDn)
+  for entry in users:
+    let node = bloodhoundNode(entry, "users", domainName, acesByDn)
+    if legacy:
+      applyBloodhoundLegacyNodeFixups(node, "users", entry, refsByDn, groupMembersByDn)
+    usersData.add node
   var groupsData = newJArray()
-  for entry in groups: groupsData.add bloodhoundNode(entry, "groups", domainName, acesByDn)
+  for entry in groups:
+    let node = bloodhoundNode(entry, "groups", domainName, acesByDn)
+    if legacy:
+      applyBloodhoundLegacyNodeFixups(node, "groups", entry, refsByDn, groupMembersByDn)
+    groupsData.add node
   var computersData = newJArray()
-  for entry in computers: computersData.add bloodhoundNode(entry, "computers", domainName, acesByDn)
+  for entry in computers:
+    let node = bloodhoundNode(entry, "computers", domainName, acesByDn)
+    if legacy:
+      applyBloodhoundLegacyNodeFixups(node, "computers", entry, refsByDn, groupMembersByDn)
+    computersData.add node
   var gposData = newJArray()
-  for entry in gpos: gposData.add bloodhoundNode(entry, "gpos", domainName, acesByDn)
+  for entry in gpos:
+    let node = bloodhoundNode(entry, "gpos", domainName, acesByDn)
+    if legacy:
+      applyBloodhoundLegacyNodeFixups(node, "gpos", entry, refsByDn, groupMembersByDn)
+    gposData.add node
   var trustsData = newJArray()
   for entry in trusts: trustsData.add bloodhoundTrustNode(entry, domainName)
 
-  let files = [
-    ("domains.json", bloodhoundFileJson("domains", domains)),
-    ("users.json", bloodhoundFileJson("users", usersData)),
-    ("groups.json", bloodhoundFileJson("groups", groupsData)),
-    ("computers.json", bloodhoundFileJson("computers", computersData)),
-    ("gpos.json", bloodhoundFileJson("gpos", gposData)),
-    ("trusts.json", bloodhoundFileJson("trusts", trustsData))
-  ]
+  let prefix = if legacy: now().format("yyyyMMddHHmmss") & "_" else: ""
+  let files =
+    if legacy:
+      [
+        (prefix & "domains.json", bloodhoundLegacyFileJson("domains", domains)),
+        (prefix & "users.json", bloodhoundLegacyFileJson("users", usersData)),
+        (prefix & "groups.json", bloodhoundLegacyFileJson("groups", groupsData)),
+        (prefix & "computers.json", bloodhoundLegacyFileJson("computers", computersData)),
+        (prefix & "gpos.json", bloodhoundLegacyFileJson("gpos", gposData)),
+        (prefix & "trusts.json", bloodhoundLegacyFileJson("trusts", trustsData))
+      ]
+    else:
+      [
+        ("domains.json", bloodhoundFileJson("domains", domains)),
+        ("users.json", bloodhoundFileJson("users", usersData)),
+        ("groups.json", bloodhoundFileJson("groups", groupsData)),
+        ("computers.json", bloodhoundFileJson("computers", computersData)),
+        ("gpos.json", bloodhoundFileJson("gpos", gposData)),
+        ("trusts.json", bloodhoundFileJson("trusts", trustsData))
+      ]
   var written = newJArray()
   var validation = newJArray()
   for item in files:
@@ -4144,7 +4258,8 @@ proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: str
       valid = false
       break
   result = %*{"path": root, "files": written, "zipped": false,
-    "validation": validation, "valid": valid}
+    "validation": validation, "valid": valid,
+    "format": if legacy: "bloodhound-legacy-4" else: "bloodhound-ce"}
   if wantZip:
     let parent = parentDir(zipPath)
     if parent.len > 0:
@@ -8139,6 +8254,7 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
   if config.ldapBloodhound:
     result["operation"] = %"bloodhound"
     result["success"] = %(probe.speaksLdap and (not probe.authAttempted or probe.authenticated))
+    result["legacy"] = %config.ldapBloodhoundLegacy
     result["bloodhound"] = %*{
       "meta": {
         "type": "nimux-bloodhound",
@@ -8169,7 +8285,7 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
         config.ldapBloodhoundOut, config.domain, probe.defaultNamingContext,
         probe.domainSid, probe.domainFunctionality,
         probe.users, probe.groups, probe.computers, probe.trusts, probe.gpos,
-        acesByDn)
+        acesByDn, config.ldapBloodhoundLegacy)
       result["success"] = %(result["success"].getBool() and
         result["bloodhound_output"]{"valid"}.getBool() and
         (not result["bloodhound_output"]{"zipped"}.getBool(false) or
@@ -9938,6 +10054,8 @@ proc renderProtocolLine(node: JsonNode): string =
         result.add "\n" & kv("operation", bold(node{"operation"}.getStr()))
       if node{"operation"}.getStr() == "bloodhound":
         let bh = node{"bloodhound"}
+        result.add "\n" & kv("format",
+          if node{"legacy"}.getBool(): brightYellow("legacy 4.x") else: brightCyan("ce"))
         if node{"default_naming_context"}.getStr().len > 0:
           result.add "\n" & kv("base dn", brightCyan(node{"default_naming_context"}.getStr()))
         if node{"domain_sid"}.getStr().len > 0:
@@ -9950,6 +10068,8 @@ proc renderProtocolLine(node: JsonNode): string =
           result.add "\n" & kv("trusts", $bh{"trusts"}.len)
         let output = node{"bloodhound_output"}
         if output != nil and output.kind == JObject:
+          if output{"format"}.getStr().len > 0:
+            result.add "\n" & kv("output", output{"format"}.getStr())
           if output{"zip"}.getStr().len > 0:
             let zipOk = output{"valid"}.getBool() and output{"zipped"}.getBool()
             result.add "\n" & kv("zip", (if zipOk: brightGreen(output{"zip"}.getStr()) else: red(output{"zip"}.getStr())))

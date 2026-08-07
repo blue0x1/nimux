@@ -131,6 +131,7 @@ Read-only LDAP:
 nimux ldap <dc> -u <user> -p '<password>' -d <domain> --query users --json
 nimux ldap <dc> -u <user> -p '<password>' -d <domain> --query dcs --query trusts --query admins --json
 nimux ldap <dc> -u <user> -p '<password>' -d <domain> --bloodhound --bloodhound-out bloodhound.zip
+nimux ldap <dc> -u <user> -p '<password>' -d <domain> --bloodhound --legacy --bloodhound-out bloodhound-legacy.zip
 nimux ldap <dc> -u <user> -p '<password>' -d <domain> --filter '(servicePrincipalName=*)' --attrs sAMAccountName,servicePrincipalName
 ```
 

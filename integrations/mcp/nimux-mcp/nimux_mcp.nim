@@ -437,7 +437,8 @@ proc toolDefs(): seq[ToolDef] =
     ToolDef(name: "nimux.ldap_query", risk: riskRead, description: "Run LDAP named queries or a filter.",
       schema: schema(@["dc"], authProps & @[
         ("dc", prop("string")), ("queries", %*{"type": "array", "items": {"type": "string"}}),
-        ("filter", prop("string")), ("attrs", prop("string")), ("bloodhound_out", prop("string"))
+        ("filter", prop("string")), ("attrs", prop("string")), ("bloodhound_out", prop("string")),
+        ("bloodhound_legacy", prop("boolean"))
       ])),
     ToolDef(name: "nimux.kerberos_request", risk: riskRead, description: "Run Kerberos ticket operations.",
       schema: schema(@["kdc", "request"], authProps & @[
@@ -626,7 +627,10 @@ proc toolCall(name: string; args: JsonNode; policy: Policy): JsonNode =
     let attrs = getStr(args, "attrs")
     if attrs.len > 0: argv.add(@["--attrs", attrs])
     let bh = getStr(args, "bloodhound_out")
-    if bh.len > 0: argv.add(@["--bloodhound", "--bloodhound-out", bh])
+    if bh.len > 0:
+      argv.add(@["--bloodhound", "--bloodhound-out", bh])
+      if getBool(args, "bloodhound_legacy"):
+        argv.add("--legacy")
     addCommon(argv, args)
     argv.add("--json")
     runWrapped(argv, args, policy)
