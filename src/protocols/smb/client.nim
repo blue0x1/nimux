@@ -392,14 +392,15 @@ proc buildSmb2Header(command: uint16; messageId: uint64; sessionId = 0'u64; tree
   for _ in 0 ..< 16:
     result.add char(0)
 
-proc buildSmbSessionSetupRequest*(securityBlob: string; messageId = 1'u64): string =
+proc buildSmbSessionSetupRequest*(securityBlob: string; messageId = 1'u64;
+                                  securityMode = 1'u8): string =
   let securityBufferOffset = Smb2HeaderLen + 24
   result = newStringOfCap(4 + Smb2HeaderLen + 24 + securityBlob.len)
   result.add "\x00\x00\x00\x00"
   result.add buildSmb2Header(Smb2CommandSessionSetup, messageId)
   result.addU16Le 25
   result.add char(0)
-  result.add char(1)
+  result.add char(securityMode)
   result.addU32Le 0
   result.addU32Le 0
   result.addU16Le securityBufferOffset.uint16
@@ -408,7 +409,8 @@ proc buildSmbSessionSetupRequest*(securityBlob: string; messageId = 1'u64): stri
   result.add securityBlob
   result.patchNetbiosLength()
 
-proc buildSmbSessionSetupRequest*(securityBlob: string; messageId, sessionId: uint64): string =
+proc buildSmbSessionSetupRequest*(securityBlob: string; messageId, sessionId: uint64;
+                                  securityMode = 1'u8): string =
   let securityBufferOffset = Smb2HeaderLen + 24
   result = newStringOfCap(4 + Smb2HeaderLen + 24 + securityBlob.len)
   result.add "\x00\x00\x00\x00"
@@ -416,7 +418,7 @@ proc buildSmbSessionSetupRequest*(securityBlob: string; messageId, sessionId: ui
     creditCharge = 1'u16)
   result.addU16Le 25
   result.add char(0)
-  result.add char(1)
+  result.add char(securityMode)
   result.addU32Le 0
   result.addU32Le 0
   result.addU16Le securityBufferOffset.uint16
@@ -1151,16 +1153,13 @@ proc stripGssApiWrapper(token: string): string =
 proc spnegoKerberosInit*(gssToken: string): string =
   let spnegoOid = derOid([byte 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02])
   let msKrb5Oid = derOid([byte 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02])
-  let krb5Oid = derOid([byte 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02])
-  let apReq = stripGssApiWrapper(gssToken)
-  let mechTypes = derTlv(0xa0'u8, derTlv(0x30'u8, msKrb5Oid & krb5Oid))
-  let mechToken = derTlv(0xa2'u8, derTlv(0x04'u8, apReq))
+  let mechTypes = derTlv(0xa0'u8, derTlv(0x30'u8, msKrb5Oid))
+  let mechToken = derTlv(0xa2'u8, derTlv(0x04'u8, gssToken))
   let negTokenInit = derTlv(0xa0'u8, derTlv(0x30'u8, mechTypes & mechToken))
   derTlv(0x60'u8, spnegoOid & negTokenInit)
 
 proc spnegoKerberosNext*(gssToken: string): string =
-  let apReq = stripGssApiWrapper(gssToken)
-  let mechToken = derTlv(0xa2'u8, derTlv(0x04'u8, apReq))
+  let mechToken = derTlv(0xa2'u8, derTlv(0x04'u8, gssToken))
   let negTokenResp = derTlv(0xa1'u8, derTlv(0x30'u8, mechToken))
   negTokenResp
 
@@ -1943,6 +1942,7 @@ proc rpcCallEx*(ctx: SmbRpcCtx; pipe: SmbPipeInfo; opnum: uint16;
   var writeAck = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
   while writeAck.len >= 16 and readU32Le(writeAck, 12) == 0x00000103'u32:
     writeAck = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
+  var emptyReads = 0
   while true:
     let readPkt = ctx.signed(buildSmbReadRequest(pipe.fileId, 4280,
       ctx.nextMid(), ctx.sessionId, ctx.treeId))
@@ -1952,7 +1952,12 @@ proc rpcCallEx*(ctx: SmbRpcCtx; pipe: SmbPipeInfo; opnum: uint16;
       resp = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
     let payload = parseSmbReadData(resp)
     if payload.len < 24 or ord(payload[0]) != 5:
+      inc emptyReads
+      if emptyReads < 20 and resp.len > 0:
+        await sleepAsync(150)
+        continue
       break
+    emptyReads = 0
     let pType = uint8(ord(payload[2]))
     let pfcFlags = ord(payload[3])
     result.packetType = pType
@@ -2011,6 +2016,7 @@ proc unsealDceRpcResponseStub(sealCtx: NtlmSealContext; payload: string): string
   if payload.len - authLen + 12 <= payload.len:
     discard rc4Process(sealCtx.serverSealHandle, payload[payload.len - authLen + 4 ..< payload.len - authLen + 12])
   result = decStub[0 ..< max(0, decStub.len - padLen)]
+  dbgDump("DCE/RPC sealed RESPONSE decrypted stub", result)
 
 proc rpcBindPipeNtlm*(ctx: SmbRpcCtx; pipe: SmbPipeInfo;
                       interfaceUuid: seq[byte]; versionMajor, versionMinor: uint16;
@@ -2063,6 +2069,7 @@ proc rpcCallExSealed*(ctx: SmbRpcCtx; pipe: SmbPipeInfo;
   var writeAck = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
   while writeAck.len >= 16 and readU32Le(writeAck, 12) == 0x00000103'u32:
     writeAck = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
+  var emptyReads = 0
   while true:
     let readPkt = ctx.signed(buildSmbReadRequest(pipe.fileId, 4280,
       ctx.nextMid(), ctx.sessionId, ctx.treeId))
@@ -2071,7 +2078,13 @@ proc rpcCallExSealed*(ctx: SmbRpcCtx; pipe: SmbPipeInfo;
     while resp2.len >= 16 and readU32Le(resp2, 12) == 0x00000103'u32:
       resp2 = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
     let payload = parseSmbReadData(resp2)
-    if payload.len < 24 or ord(payload[0]) != 5: break
+    if payload.len < 24 or ord(payload[0]) != 5:
+      inc emptyReads
+      if emptyReads < 20 and resp2.len > 0:
+        await sleepAsync(150)
+        continue
+      break
+    emptyReads = 0
     let pType = uint8(ord(payload[2]))
     let pfcFlags = ord(payload[3])
     result.packetType = pType
@@ -2217,6 +2230,7 @@ proc rpcCallExKerbSealed*(ctx: SmbRpcCtx; pipe: SmbPipeInfo;
   var writeAck = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
   while writeAck.len >= 16 and readU32Le(writeAck, 12) == 0x00000103'u32:
     writeAck = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
+  var emptyReads = 0
   while true:
     let readPkt = ctx.signed(buildSmbReadRequest(pipe.fileId, 4280,
       ctx.nextMid(), ctx.sessionId, ctx.treeId))
@@ -2225,7 +2239,13 @@ proc rpcCallExKerbSealed*(ctx: SmbRpcCtx; pipe: SmbPipeInfo;
     while resp2.len >= 16 and readU32Le(resp2, 12) == 0x00000103'u32:
       resp2 = await recvWithTimeout(ctx.socket, 65535, ctx.timeoutMs)
     let payload = parseSmbReadData(resp2)
-    if payload.len < 24 or ord(payload[0]) != 5: break
+    if payload.len < 24 or ord(payload[0]) != 5:
+      inc emptyReads
+      if emptyReads < 20 and resp2.len > 0:
+        await sleepAsync(150)
+        continue
+      break
+    emptyReads = 0
     let pType = uint8(ord(payload[2]))
     let pfcFlags = ord(payload[3])
     result.packetType = pType
@@ -3641,7 +3661,10 @@ proc establishSmbSession*(host: string; port, timeoutMs: int;
         result.message = "Kerberos produced no AP-REQ token; check KRB5CCNAME/kinit"
         socket.close()
         return
-      let authReq = buildSmbSessionSetupRequest(spnegoKerberosInit(tok.token))
+      let sessionSetupSecurityMode =
+        if result.negotiate.signingRequired: 2'u8 else: 1'u8
+      let authReq = buildSmbSessionSetupRequest(spnegoKerberosInit(tok.token),
+        securityMode = sessionSetupSecurityMode)
       updatePreauthHash(preauthHash, authReq)
       await socket.send(authReq)
       let authResp = await recvWithTimeout(socket, 4096, timeoutMs)
@@ -3653,7 +3676,9 @@ proc establishSmbSession*(host: string; port, timeoutMs: int;
       var authStatus = readU32Le(authResp, 12)
       var finalSessionId = readU64Le(authResp, 44)
       var finalResp = authResp
+      var kerberosStage = "initial"
       if authStatus == 0xC0000016'u32:
+        kerberosStage = "continuation"
         let serverBlob = parseSessionSetupSecurityBlob(authResp)
         let mechToken = firstSpnegoResponseToken(serverBlob)
         var nextTok: krb.KerberosToken
@@ -3669,7 +3694,8 @@ proc establishSmbSession*(host: string; port, timeoutMs: int;
             result.message = "SMB Kerberos continuation failed: " & error.msg
             socket.close()
             return
-        let nextReq = buildSmbSessionSetupRequest(continuationBlob, 2'u64, finalSessionId)
+        let nextReq = buildSmbSessionSetupRequest(continuationBlob, 2'u64,
+          finalSessionId, securityMode = sessionSetupSecurityMode)
         updatePreauthHash(preauthHash, nextReq)
         await socket.send(nextReq)
         finalResp = await recvWithTimeout(socket, 4096, timeoutMs)
@@ -3681,7 +3707,8 @@ proc establishSmbSession*(host: string; port, timeoutMs: int;
         authStatus = readU32Le(finalResp, 12)
         finalSessionId = readU64Le(finalResp, 44)
       if authStatus != 0:
-        result.message = "SMB Kerberos authentication failed 0x" & authStatus.toHex(8)
+        result.message = "SMB Kerberos authentication failed during " &
+          kerberosStage & " session setup 0x" & authStatus.toHex(8)
         socket.close()
         return
       let serverBlob = parseSessionSetupSecurityBlob(finalResp)

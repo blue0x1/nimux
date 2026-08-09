@@ -175,7 +175,7 @@ proc smbExec*(host: string; port, timeoutMs: int;
               username, password, ntlmHash, domain, command: string;
               waitMs = 1500;
               authMethod: smb.SmbAuthMethod = smb.samNtlm;
-              ccache = ""): Future[SmbExecResult] {.async.} =
+              ccache = ""; krb5Config = ""): Future[SmbExecResult] {.async.} =
   result.host = host
   result.port = port
   result.username = username
@@ -183,7 +183,7 @@ proc smbExec*(host: string; port, timeoutMs: int;
   let credential = smb.SmbCredential(
     username: username, password: password,
     ntlmHash: ntlmHash, domain: domain,
-    ccache: ccache)
+    ccache: ccache, krb5Config: krb5Config)
   let session = await smb.establishSmbSession(host, port, timeoutMs, credential, authMethod)
   if session == nil or not session.authenticated:
     result.message = if session == nil: "no session" else: session.message
@@ -262,10 +262,10 @@ proc smbExec*(host: string; port, timeoutMs: int;
 proc openSmbExecSession*(host: string; port, timeoutMs: int;
                          username, password, ntlmHash, domain: string;
                          authMethod: smb.SmbAuthMethod = smb.samNtlm;
-                         ccache = ""): Future[SmbExecSession] {.async.} =
+                         ccache = ""; krb5Config = ""): Future[SmbExecSession] {.async.} =
   result = SmbExecSession()
   let cred = smb.SmbCredential(username: username, password: password,
-    ntlmHash: ntlmHash, domain: domain, ccache: ccache)
+    ntlmHash: ntlmHash, domain: domain, ccache: ccache, krb5Config: krb5Config)
   let session = await smb.establishSmbSession(host, port, timeoutMs, cred, authMethod)
   if session == nil or not session.authenticated:
     result.message = if session == nil: "no session" else: session.message
