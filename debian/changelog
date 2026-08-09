@@ -1,3 +1,9 @@
+nimux (1.0.4) unstable; urgency=medium
+
+  * Release nimux 1.0.4.
+
+ -- Chokri Hammedi <52697989+blue0x1@users.noreply.github.com>  Sun, 09 Aug 2026 01:55:00 +0300
+
 nimux (1.0.3) unstable; urgency=medium
 
   * Improve secrets and DCSync dumping for signed Windows DCs.
