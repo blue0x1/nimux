@@ -37,6 +37,8 @@ type
     kerberoastable*: seq[LdapEntry]
     trusts*: seq[LdapEntry]
     gpos*: seq[LdapEntry]
+    ous*: seq[LdapEntry]
+    containers*: seq[LdapEntry]
     schema*: seq[LdapEntry]
     config*: seq[LdapEntry]
     fgpp*: seq[LdapEntry]
@@ -243,6 +245,8 @@ type
     kerberoast*: bool
     trusts*: bool
     gpos*: bool
+    ous*: bool
+    containers*: bool
     schema*: bool
     config*: bool
     fgpp*: bool
@@ -3289,7 +3293,8 @@ proc probeLdap*(host: string; port, timeoutMs: int;
 
     if not queries.rootDse and not queries.users and not queries.groups and
         not queries.computers and not queries.asreproast and not queries.kerberoast and
-        not queries.trusts and not queries.gpos and not queries.schema and
+        not queries.trusts and not queries.gpos and not queries.ous and
+        not queries.containers and not queries.schema and
         not queries.config and not queries.fgpp and not queries.deleted and
         not queries.locked and not queries.expiredPasswords and
         not queries.staleUsers and not queries.neverLoggedOn and
@@ -3423,12 +3428,21 @@ proc probeLdap*(host: string; port, timeoutMs: int;
     let perQueryLimit = if queries.limit > 0: queries.limit else: 1000
 
     if queries.users:
-      let userFilter = filterEquality("sAMAccountType", "805306368")
+      let userFilter = filterOr([
+        filterAnd([
+          filterEquality("objectCategory", "person"),
+          filterEquality("objectClass", "user")
+        ]),
+        filterEquality("objectClass", "msDS-GroupManagedServiceAccount"),
+        filterEquality("objectClass", "msDS-ManagedServiceAccount")
+      ])
       let userAttrs =
         if queries.customAttrs.len > 0: queries.customAttrs
         else: @["sAMAccountName", "userPrincipalName", "displayName",
           "userAccountControl", "memberOf", "description", "objectSid",
-          "servicePrincipalName"]
+          "servicePrincipalName", "primaryGroupID", "distinguishedName",
+          "adminCount", "pwdLastSet", "lastLogon", "lastLogonTimestamp",
+          "whenCreated", "sIDHistory", "msDS-GroupMSAMembership"]
       result.users = await runQuery(userFilter,
         userAttrs, perQueryLimit)
 
@@ -3439,16 +3453,24 @@ proc probeLdap*(host: string; port, timeoutMs: int;
       ])
       let groupAttrs =
         if queries.customAttrs.len > 0: queries.customAttrs
-        else: @["sAMAccountName", "cn", "description", "objectSid", "groupType"]
+        else: @["sAMAccountName", "cn", "description", "objectSid", "groupType",
+          "member", "memberOf", "distinguishedName", "adminCount", "whenCreated"]
       result.groups = await runQuery(groupFilter,
         groupAttrs, perQueryLimit)
 
     if queries.computers:
-      let compFilter = filterEquality("sAMAccountType", "805306369")
+      let compFilter = filterAnd([
+        filterEquality("sAMAccountType", "805306369"),
+        filterNot(filterEquality("objectClass", "msDS-GroupManagedServiceAccount")),
+        filterNot(filterEquality("objectClass", "msDS-ManagedServiceAccount"))
+      ])
       let compAttrs =
         if queries.customAttrs.len > 0: queries.customAttrs
         else: @["dNSHostName", "sAMAccountName", "operatingSystem",
-          "operatingSystemVersion", "objectSid"]
+          "operatingSystemVersion", "operatingSystemServicePack", "objectSid",
+          "primaryGroupID", "distinguishedName", "servicePrincipalName",
+          "userAccountControl", "pwdLastSet", "lastLogon", "lastLogonTimestamp",
+          "whenCreated", "sIDHistory", "ms-Mcs-AdmPwd"]
       result.computers = await runQuery(compFilter,
         compAttrs, perQueryLimit)
 
@@ -3495,7 +3517,24 @@ proc probeLdap*(host: string; port, timeoutMs: int;
       let gpoFilter = filterEquality("objectClass", "groupPolicyContainer")
       result.gpos = await runQueryAt(baseDn, gpoFilter,
         @["cn", "displayName", "gPCFileSysPath", "versionNumber",
-          "flags", "whenChanged"])
+          "flags", "whenChanged", "whenCreated", "distinguishedName",
+          "objectGUID", "description"])
+
+    if queries.ous:
+      let ouFilter = filterEquality("objectClass", "organizationalUnit")
+      result.ous = await runQueryAt(baseDn, ouFilter,
+        @["name", "ou", "description", "distinguishedName", "objectGUID",
+          "gPOptions", "gPLink", "whenCreated"])
+
+    if queries.containers:
+      let containerFilter = filterAnd([
+        filterEquality("objectCategory", "container"),
+        filterEquality("objectClass", "container"),
+        filterNot(filterEquality("objectClass", "groupPolicyContainer"))
+      ])
+      result.containers = await runQueryAt(baseDn, containerFilter,
+        @["name", "cn", "description", "distinguishedName", "objectGUID",
+          "whenCreated"])
 
     if queries.certificateInventory:
       let certFilter = filterOr([

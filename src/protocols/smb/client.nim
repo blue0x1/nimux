@@ -1203,7 +1203,7 @@ proc firstSpnegoResponseToken*(blob: string): string =
 
 
 proc hasCredential*(credential: SmbCredential): bool =
-  credential.username.len > 0 and (credential.password.len > 0 or credential.ntlmHash.len > 0)
+  credential.username.len > 0
 
 proc randomBytes*(count: int): string =
   randomize()
@@ -2743,6 +2743,39 @@ proc parseLsarOpenPolicy2*(stub: string): tuple[handle: string, status: uint32] 
   result.handle = stub[0 ..< 20]
   result.status = readU32Le(stub, 20)
 
+proc buildLsarQueryInformationPolicy2Stub*(policyHandle: string;
+                                           infoClass: uint16 = 5'u16): string =
+  if policyHandle.len != 20:
+    raise newException(ValueError, "LSARPC policy handle must be 20 bytes")
+  result.add policyHandle
+  result.addU16Le infoClass
+
+proc parseLsarQueryAccountDomain*(stub: string): tuple[name: string, sid: string, status: uint32] =
+  result.status = if stub.len >= 4: readU32Le(stub, stub.len - 4) else: uint32.high
+  if stub.len < 24:
+    return
+  var offset = 0
+  let infoPtr = readU32Le(stub, offset); offset += 4
+  if infoPtr == 0:
+    return
+  let tag = readU16Le(stub, offset); offset += 2
+  while offset mod 4 != 0: inc offset
+  if tag != 5'u16 and tag != 3'u16:
+    return
+  if offset + 12 > stub.len:
+    return
+  let nameLen = int(readU16Le(stub, offset)); offset += 2
+  discard readU16Le(stub, offset); offset += 2
+  let namePtr = readU32Le(stub, offset); offset += 4
+  let sidPtr = readU32Le(stub, offset); offset += 4
+  if namePtr != 0 and nameLen > 0:
+    result.name = readNdrUtf16Counted(stub, offset)
+  if sidPtr != 0:
+    if offset + 4 > stub.len: return
+    discard readU32Le(stub, offset); offset += 4
+    let parsed = parseSidBytes(stub, offset)
+    result.sid = parsed.sid
+
 proc buildLsarLookupSidsStub*(policyHandle: string;
                               sids: openArray[string];
                               lookupLevel: uint16 = 1): string =
@@ -3339,31 +3372,41 @@ proc enumerateSmbExtras*(ctx: SmbRpcCtx; srvsvcPipe: SmbPipeInfo;
   if requests.ridBrute:
     probe.ridBrute.attempted = true
     try:
-      if domainSid.len == 0:
-        probe.ridBrute.message = "rid-brute requires a domain SID (enable --users)"
+      let pipe = await openSmbPipe(ctx, "lsarpc")
+      if not pipe.opened:
+        probe.ridBrute.message = "lsarpc pipe failed"
       else:
-        let pipe = await openSmbPipe(ctx, "lsarpc")
-        if not pipe.opened:
-          probe.ridBrute.message = "lsarpc pipe failed"
+        let bindAck = await rpcBindPipe(ctx, pipe, buildDceRpcBindLsarpc(40'u32))
+        if not bindAck.bound:
+          probe.ridBrute.message = "LSARPC bind failed"
         else:
-          let bindAck = await rpcBindPipe(ctx, pipe, buildDceRpcBindLsarpc(40'u32))
-          if not bindAck.bound:
-            probe.ridBrute.message = "LSARPC bind failed"
+          let openStub = await rpcCall(ctx, pipe, 44'u16,
+            buildLsarOpenPolicy2Stub(ctx.host, 0x02000800'u32), 41'u32)
+          let pol = parseLsarOpenPolicy2(openStub)
+          if pol.handle.len != 20:
+            probe.ridBrute.message = "LsarOpenPolicy2 failed"
           else:
-            let openStub = await rpcCall(ctx, pipe, 44'u16,
-              buildLsarOpenPolicy2Stub(ctx.host), 41'u32)
-            let pol = parseLsarOpenPolicy2(openStub)
-            if pol.handle.len != 20:
-              probe.ridBrute.message = "LsarOpenPolicy2 failed"
+            var lookupBaseSid = domainSid
+            if lookupBaseSid.len == 0:
+              let sidStub = await rpcCall(ctx, pipe, 46'u16,
+                buildLsarQueryInformationPolicy2Stub(pol.handle, 5'u16), 42'u32)
+              let sidInfo = parseLsarQueryAccountDomain(sidStub)
+              lookupBaseSid = sidInfo.sid
+              if sidInfo.status != 0 and lookupBaseSid.len == 0:
+                probe.ridBrute.rpcStatus = sidInfo.status
+                probe.ridBrute.message = "LsarQueryInformationPolicy2 failed 0x" & sidInfo.status.toHex(8)
+            if lookupBaseSid.len == 0:
+              if probe.ridBrute.message.len == 0:
+                probe.ridBrute.message = "LSARPC account-domain SID unavailable"
             else:
               const Batch = 100
               var rid = requests.ridBruteStart
-              var callId = 42'u32
+              var callId = 43'u32
               while rid <= requests.ridBruteEnd:
                 var batch: seq[string]
                 var r = rid
                 while r <= requests.ridBruteEnd and batch.len < Batch:
-                  batch.add domainSid & "-" & $r
+                  batch.add lookupBaseSid & "-" & $r
                   inc r
                 let lookupStub = await rpcCall(ctx, pipe, 15'u16,
                   buildLsarLookupSidsStub(pol.handle, batch), callId)
@@ -3374,6 +3417,7 @@ proc enumerateSmbExtras*(ctx: SmbRpcCtx; srvsvcPipe: SmbPipeInfo;
                     probe.ridBrute.entries.add item
                 rid = r
               probe.ridBrute.succeeded = true
+              probe.ridBrute.message = "LSARPC RID lookup complete (domain SID " & lookupBaseSid & ")"
     except CatchableError as error:
       probe.ridBrute.message = cleanError(error)
 

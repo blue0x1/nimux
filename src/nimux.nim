@@ -513,6 +513,7 @@ ENUMERATION (require -u/-p or -H)
   --sessions           Active SMB sessions via SRVSVC
   --disks              Server disks via SRVSVC
   --rid-brute [n]    LSARPC RID brute, optional max RID (default 4000)
+  --lookupsid [n]     Impacket-lookupsid style alias for --rid-brute
   --rid-range <a-b>    Explicit RID brute range, e.g. 500-1500
   --coerce --listener <fqdn>
                        Trigger MS-RPRN coercion to the listener
@@ -1717,6 +1718,7 @@ SMB enumeration (--users, --groups, ... require -u/-p or -H)
   --sessions           Active SMB sessions via SRVSVC
   --disks              Server disks via SRVSVC
   --rid-brute [n]    LSARPC RID brute, optional max RID (default 4000)
+  --lookupsid [n]     Impacket-lookupsid style alias for --rid-brute
   --rid-range <a-b>    Explicit RID brute range (e.g. 500-1500)
   --dialects <list>    SMB dialects, e.g. 0202,0210,0300,0302
 
@@ -2108,7 +2110,7 @@ proc parseCli(): CliConfig =
     elif token.len == 3 and token[0] == '-' and token[1] == 'T' and
         token[2] in {'0'..'9'}:
       token = "--T:" & $token[2]
-    if token == "--rid-brute" and index + 1 < rawArgs.len:
+    if token in ["--rid-brute", "--lookupsid"] and index + 1 < rawArgs.len:
       var numeric = rawArgs[index + 1].len > 0
       for ch in rawArgs[index + 1]:
         if ch notin {'0'..'9'}:
@@ -2396,7 +2398,7 @@ proc parseCli(): CliConfig =
         result.sessions = true
       of "disks":
         result.disks = true
-      of "rid-brute":
+      of "rid-brute", "lookupsid":
         result.ridBrute = true
         if value.len > 0:
           result.ridBruteEnd = uint32(parseInt(value))
