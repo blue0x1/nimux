@@ -99,12 +99,16 @@ nimux.protocol_probe
 nimux.report_summary
 ```
 
+`nimux.smb_enum` can pass SMB spider flags such as `--spider`, `--share`,
+`--remote`, `--max-depth`, `--spider-pattern`, `--size-limit`, and
+`--interesting` for read-only share crawling.
+
 The wrapper maps the main command families into typed tool calls:
 
 ```text
 scan, smb, ldap, kerberos, krb5conf, winrm, scm, bin, cim, tsch, mmc,
 socks, secrets, dcsync, mssql, postgres, mysql, ssh, ftp, vnc, nfs,
-afp, webdav, http, rdp, put, get, ls, mkdir, rm
+afp, webdav, http, dns, rdp, put, get, ls, mkdir, rm
 ```
 
 ## Native Pivoting Model
@@ -247,6 +251,11 @@ The MCP wrapper should recognize the current nimux CLI even when not every flow 
 - `nimux ldap --adcs-request --adcs-rpc ... --out <file.pfx>` as certificate material creation.
 - `nimux ldap --adcs-auth --pfx <file.pfx> --ccache <file> --krb5-config <file>` as PKINIT ccache generation.
 - `nimux ldap --server --srvhost <ip> --srvport <port> [--challenge <hex>]` as a long-running capture listener.
+- `nimux http <host> --dirs <wordlist> --workers <n> --status <codes> --baseline --json` as read-only directory discovery with soft-404 filtering.
+- `nimux http <host> --dirs <wordlist> --auto-calibrate --recursion --depth <n> --extract-links --json` as read-only calibrated recursive discovery.
+- `nimux http <host> --files <wordlist> --extensions <csv> --filter-regex <re> -fs <size> --json` as read-only file discovery.
+- `nimux http <ip> --vhosts <wordlist> -d <domain> --workers <n> --resume <jsonl> --json` as read-only virtual-host discovery.
+- `nimux dns <domain> --subdomains <wordlist> --workers <n> --json` as read-only subdomain discovery.
 
 LDAP capture and ADCS request outputs can contain credential-equivalent material. Redact captures, PFX/private key paths when appropriate, and never store raw secrets in MCP logs.
 

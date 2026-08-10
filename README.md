@@ -11,7 +11,7 @@
 
 # nimux - Native Operator Toolkit
 
-nimux is a native command surface for authorized security assessments. It combines network enumeration, credential validation, Active Directory operations, Kerberos workflows, remote execution, file movement, secrets collection, DCSync, GPO operations, database clients, and SOCKS routing into one Pure-Nim toolkit.
+nimux is a native command surface for authorized security assessments. It combines network enumeration, lightweight web discovery, credential validation, Active Directory operations, Kerberos workflows, remote execution, file movement, secrets collection, DCSync, GPO operations, database clients, and SOCKS routing into one Pure-Nim toolkit.
 
 You are on the official public repository for nimux.
 
@@ -118,6 +118,16 @@ docker run --rm -it --network host ghcr.io/blue0x1/nimux:latest \
   scan 10.10.10.0/24 --port 445,389,5985 --open
 ```
 
+Run lightweight web discovery:
+
+```bash
+nimux http app.htb --dirs words.txt --workers 100 --status 200,301,302,403 --baseline
+nimux http app.htb --dirs words.txt --auto-calibrate --recursion --depth 2 --extract-links
+nimux http app.htb --files words.txt --extensions php,txt,bak --workers 100 --filter-regex 'Not Found' -fs 325
+nimux http 10.10.10.10 --vhosts vhosts.txt -d app.htb --workers 100 --resume seen.jsonl --json
+nimux dns app.htb --subdomains subdomains.txt --workers 200 --json
+```
+
 Run the MCP wrapper:
 
 ```bash
@@ -182,6 +192,7 @@ sudo apt install ../nimux_*.deb
 ```bash
 nimux scan 10.10.10.0/24 --port 445,389,5985 --open
 nimux smb dc01.corp.local -u operator -H <nt_hash> -d corp.local --shares --users
+nimux smb files01.corp.local -u operator -p '<password>' -d corp.local --spider --max-depth 3 --interesting
 nimux winrm host.corp.local -u operator -p '<password>' -d corp.local --cmd whoami
 nimux kerberos dc01.corp.local -u operator -p '<password>' -d corp.local --request kinit --out operator.ccache
 nimux scan 10.10.10.0/24 --port 445,389,5985 --proxy socks5://127.0.0.1:1080
@@ -190,7 +201,7 @@ nimux scan 10.10.10.0/24 --port 445,389,5985 --proxy socks5://127.0.0.1:1080
 # Features
 
 - TCP and UDP scanning with protocol-aware probes
-- SMB authentication, enumeration, file operations, coercion, and ticket capture workflows
+- SMB authentication, enumeration, read-only share spidering, file operations, coercion, and ticket capture workflows
 - LDAP and Active Directory enumeration, writes, ACL paths, roasting, RBCD, shadow credentials, and ADCS support
 - Kerberos TGT, TGS, S4U, ccache, kirbi, renewal, purge, and ticket forge workflows
 - WinRM, WMI, SCM, DCOM, scheduled task, and helper-service execution modes

@@ -102,6 +102,28 @@ nimux.protocol_probe
 nimux.report_summary
 ```
 
+Read-only SMB share spidering is exposed through `nimux.smb_enum` or raw
+command wrapper calls with JSON output:
+
+```bash
+nimux smb <host> -u <user> -p '<password>' -d <domain> --spider --max-depth 3 --interesting --json
+nimux smb <host> -u <user> -p '<password>' -d <domain> --spider --share Shared --spider-pattern '*.kdbx,*password*' --json
+```
+
+Lightweight web discovery is exposed through controlled `nimux.protocol_probe`
+or raw command wrapper calls with JSON output:
+
+```bash
+nimux http <host> --dirs <wordlist> --workers 100 --status 200,301,302,403 --baseline --json
+nimux http <host> --dirs <wordlist> --auto-calibrate --recursion --depth 2 --extract-links --json
+nimux http <host> --files <wordlist> --extensions php,txt,bak --filter-regex 'Not Found' -fs 325 --json
+nimux http <ip> --vhosts <wordlist> -d <domain> --workers 100 --resume seen.jsonl --json
+nimux dns <domain> --subdomains <wordlist> --workers 200 --json
+```
+
+These operations are read-only enumeration. MCP clients should still enforce
+target scope, wordlist approval, and rate/concurrency limits.
+
 ## Safety
 
 By default the example policy allows read-only activity and blocks:

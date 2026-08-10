@@ -22,7 +22,7 @@ Claude should understand all command families:
 ```text
 scan, smb, ldap, kerberos, krb5conf, winrm, scm, bin, cim, tsch, mmc,
 socks, secrets, dcsync, mssql, postgres, mysql, ssh, ftp, vnc, nfs,
-afp, webdav, http, rdp, put, get, ls, mkdir, rm
+afp, webdav, http, dns, rdp, put, get, ls, mkdir, rm
 ```
 
 
@@ -31,7 +31,7 @@ afp, webdav, http, rdp, put, get, ls, mkdir, rm
 Agents should treat local `nimux --help` as authoritative, but the 1.0.3 and 1.0.4 releases added behavior that older prompts may miss:
 
 - 1.0.3 stabilized BloodHound Legacy output and ADCS RPC workflows: `--bloodhound --legacy`, ACL/object-control export, native `ICertAdminD2` policy get/set, RPC certificate requests, PKCS#12 output, PKINIT ccache generation, and Kerberos execution with explicit `--krb5-config`.
-- 1.0.4 added LDAP capture server support and polished ADCS policy output: `nimux ldap --server`, `--srvhost`, `--srvport`, random or fixed `--challenge`, repeated LDAP captures, readable `DisableExtensionList` get output, and empty-value clearing for `--adcs-set-disable-extension-list`.
+- 1.0.4 added LDAP capture server support, polished ADCS policy output, and lightweight web discovery: `nimux ldap --server`, `--srvhost`, `--srvport`, random or fixed `--challenge`, repeated LDAP captures, readable `DisableExtensionList` get output, empty-value clearing for `--adcs-set-disable-extension-list`, `nimux http --dirs/--files/--vhosts`, soft-404 baselines, `--auto-calibrate`, `--recursion --depth`, `--extract-links`, regex/length/size filters including `-fs`, custom method/header support, rate limits, resume files, and `nimux dns --subdomains`.
 
 Do not assume these flags exist on older binaries. Check the local version and help output before building a workflow.
 
@@ -74,7 +74,13 @@ Claude should use `--dry-run` and `--rollback-out` when available.
 ```bash
 nimux scan <target> --port 445,389,5985 --open --json
 nimux smb <host> -u <user> -p '<password>' -d <domain> --shares --json
+nimux smb <host> -u <user> -p '<password>' -d <domain> --spider --max-depth 3 --interesting --json
 nimux ldap <dc> -u <user> -p '<password>' -d <domain> --query trusts --query admins --json
+nimux http <host> --dirs <wordlist> --workers 100 --status 200,301,302,403 --baseline --json
+nimux http <host> --dirs <wordlist> --auto-calibrate --recursion --depth 2 --extract-links --json
+nimux http <host> --files <wordlist> --extensions php,txt,bak --filter-regex 'Not Found' -fs 325 --json
+nimux http <ip> --vhosts <wordlist> -d <domain> --workers 100 --resume seen.jsonl --json
+nimux dns <domain> --subdomains <wordlist> --workers 200 --json
 nimux krb5conf <dc> -d <domain> --out <domain>.krb5.conf
 nimux kerberos <dc> -u <user> -p '<password>' -d <domain> --request kinit --out <user>.ccache
 nimux winrm <host> -k --ccache <user>.ccache --krb5-config <domain>.krb5.conf -u <user> -d <domain> --spn WSMAN --cmd whoami --json

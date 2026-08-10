@@ -14,6 +14,9 @@ type
     contentType*: string
     wwwAuthenticate*: string
     title*: string
+    headers*: string
+    bodyLength*: int
+    body*: string
     bodySnippet*: string
     authenticated*: bool
     authMessage*: string
@@ -76,8 +79,11 @@ proc htmlTitle(body: string): string =
     return ""
   result = body[gt + 1 ..< stop].strip().replace("\r", " ").replace("\n", " ")
 
-proc probeHttp*(host: string; port, timeoutMs: int; ssl: bool;
-                username, password, path: string): Future[HttpResult] {.async.} =
+proc probeHttpPath*(host: string; port, timeoutMs: int; ssl: bool;
+                    username, password, path, hostHeader: string;
+                    httpMethod = "GET"; userAgent = "nimux/0.1";
+                    extraHeaders: seq[string] = @[];
+                    followRedirects = true): Future[HttpResult] {.async.} =
   result.host = host
   result.port = port
   result.ssl = ssl
@@ -94,13 +100,18 @@ proc probeHttp*(host: string; port, timeoutMs: int; ssl: bool;
       if ssl:
         let ctx = newContext(verifyMode = CVerifyNone)
         ctx.wrapSocket(sock)
-      let hostHdr = if (ssl and port == 443) or (not ssl and port == 80): host else: host & ":" & $port
+      let hostName = if hostHeader.len > 0: hostHeader else: host
+      let hostHdr = if (ssl and port == 443) or (not ssl and port == 80): hostName else: hostName & ":" & $port
       let authHdr =
         if username.len > 0: "Authorization: Basic " & base64.encode(username & ":" & password) & "\r\n"
         else: ""
-      let req = "GET " & currentPath & " HTTP/1.1\r\nHost: " & hostHdr &
-        "\r\nUser-Agent: nimux/0.1\r\nAccept: */*\r\n" & authHdr &
-        "Connection: close\r\n\r\n"
+      var req = httpMethod.toUpperAscii() & " " & currentPath & " HTTP/1.1\r\nHost: " & hostHdr &
+        "\r\nUser-Agent: " & userAgent & "\r\nAccept: */*\r\n" & authHdr
+      for header in extraHeaders:
+        let clean = header.strip()
+        if clean.len > 0:
+          req.add clean & "\r\n"
+      req.add "Connection: close\r\n\r\n"
       await sock.send(req)
       let (status, reason, hdrs, body) = await recvHttpResponse(sock, timeoutMs)
       result.statusCode = status
@@ -110,6 +121,9 @@ proc probeHttp*(host: string; port, timeoutMs: int; ssl: bool;
       result.contentType = headerVal(hdrs, "Content-Type")
       result.wwwAuthenticate = headerVal(hdrs, "WWW-Authenticate")
       result.title = htmlTitle(body)
+      result.headers = hdrs
+      result.bodyLength = body.len
+      result.body = body
       result.bodySnippet = body.replace("\r", " ").replace("\n", " ")
       if result.bodySnippet.len > 160:
         result.bodySnippet.setLen(160)
@@ -120,10 +134,15 @@ proc probeHttp*(host: string; port, timeoutMs: int; ssl: bool;
         result.authenticated = true
       elif username.len == 0:
         result.authenticated = status notin [401]
-      if status in [301, 302, 307, 308] and result.location.len > 0:
+      if followRedirects and status in [301, 302, 307, 308] and result.location.len > 0:
         if result.location.startsWith("/"):
           currentPath = result.location
           continue
       return
     finally:
       try: sock.close() except: discard
+
+proc probeHttp*(host: string; port, timeoutMs: int; ssl: bool;
+                username, password, path: string): Future[HttpResult] {.async.} =
+  result = await probeHttpPath(host, port, timeoutMs, ssl, username, password,
+    path, "")

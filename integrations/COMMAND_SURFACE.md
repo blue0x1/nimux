@@ -84,7 +84,8 @@ vnc        VNC/RFB auth checks
 nfs        NFS/RPC portmapper and export listing
 afp        Apple Filing Protocol info and auth
 webdav     WebDAV auth and listing
-http       HTTP probe, headers, title, body fingerprint
+http       HTTP probe, dirs/files, vhosts, headers, title, body fingerprint
+dns        Lightweight DNS subdomain enumeration
 rdp        RDP probe, TLS cert, NTLM info
 put        SMB file upload
 get        SMB file download
@@ -123,13 +124,15 @@ Useful options:
 
 ## smb
 
-Use for SMB auth, enumeration, local admin checks, RID brute, coercion, ticket capture, and hash maintenance.
+Use for SMB auth, enumeration, read-only share spidering, local admin checks, RID brute, coercion, ticket capture, and hash maintenance.
 
 ```bash
 nimux smb <host> --json
 nimux smb <host> -u <user> -p '<password>' -d <domain> --shares --users --groups --pass-pol --json
 nimux smb <host> -u <user> -H <nt_hash> -d <domain> --sessions --loggedon-users --json
 nimux smb <host> -k --ccache <file> --krb5-config <file> -d <domain> --shares --json
+nimux smb <host> -u <user> -p '<password>' -d <domain> --spider --max-depth 3 --interesting --json
+nimux smb <host> -u <user> -p '<password>' -d <domain> --spider --share Shared --spider-pattern '*.kdbx,*password*' --json
 ```
 
 Coercion and ticket capture:
@@ -152,6 +155,13 @@ Useful options:
 --loggedon-users
 --sessions
 --disks
+--spider
+--share <name>
+--remote <path>
+--max-depth <n>
+--spider-pattern <csv>
+--size-limit <bytes>
+--interesting
 --rid-brute [n]
 --rid-range <a-b>
 --local-admins
@@ -487,6 +497,11 @@ nimux nfs <host> --json
 nimux afp <host> -u <user> -p '<password>' --json
 nimux webdav <host> -u <user> -p '<password>' --json
 nimux http <host> --json
+nimux http <host> --dirs <wordlist> --workers 100 --status 200,301,302,403 --baseline --json
+nimux http <host> --dirs <wordlist> --auto-calibrate --recursion --depth 2 --extract-links --json
+nimux http <host> --files <wordlist> --extensions php,txt,bak --filter-regex 'Not Found' -fs 325 --json
+nimux http <ip> --vhosts <wordlist> -d <domain> --workers 100 --resume seen.jsonl --json
+nimux dns <domain> --subdomains <wordlist> --workers 200 --json
 nimux rdp <host> --json
 ```
 
@@ -514,7 +529,8 @@ smb without coercion, ticket capture, or hash changes
 ldap queries, BloodHound output, and ADCS policy get operations
 kerberos describe/list/conversion
 krb5conf
-http
+http lightweight probe, dirs/files, and vhost discovery
+dns subdomain enumeration
 rdp
 ftp auth checks
 vnc auth checks

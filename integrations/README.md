@@ -55,5 +55,7 @@ Agent and MCP integration material should cover the 1.0.3 and 1.0.4 command surf
 - ADCS inventory, certificate inventory, native `ICertAdminD2` policy get/set, `EditFlags`, `DisableExtensionList`, empty-value clearing, RPC certificate requests, PFX output, and PKINIT ccache generation.
 - Kerberos execution paths that pass explicit `--krb5-config` alongside generated ccaches.
 - LDAP capture server mode with `nimux ldap --server`, `--srvhost`, `--srvport`, and optional `--challenge`.
+- Lightweight web discovery with `nimux http --dirs`, `--files`, `--vhosts`, `--workers`, status filters, soft-404 baselines, `--auto-calibrate`, `--recursion --depth`, `--extract-links`, regex filters, length/size filters (`--filter-length` / `-fs`), custom method/header support, rate limits, resume files, and `nimux dns --subdomains`.
+- Read-only SMB share spidering with `nimux smb --spider`, optional `--share`, `--remote`, `--max-depth`, `--spider-pattern`, `--size-limit`, and `--interesting` filename patterns.
 
-These workflows remain operator-driven. AI clients should parse JSON when possible, redact sensitive values, and request explicit approval before writes, certificate material creation, capture listeners, service restarts, or remote execution.
+These workflows remain operator-driven. AI clients should parse JSON when possible, redact sensitive values, and request explicit approval before writes, certificate material creation, capture listeners, service restarts, or remote execution. HTTP directory/file/vhost discovery and DNS subdomain enumeration are read-only, but clients should still respect scope, rate limits, and target authorization.

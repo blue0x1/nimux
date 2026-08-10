@@ -1,4 +1,4 @@
-import std/[asyncdispatch, asyncnet, base64, json, net, os, osproc, parseopt, random, sequtils, sets, strutils, tables, terminal, times, uri, wordwrap]
+import std/[asyncdispatch, asyncnet, base64, json, nativesockets, net, os, osproc, parseopt, random, re, sequtils, sets, strutils, tables, terminal, times, uri, wordwrap]
 import core/[targets, scanner, output, lineread, proxy]
 import protocols/smb/client as smbclient
 import protocols/ldap/client as ldapclient
@@ -118,11 +118,38 @@ type
     mssqlClrCommand: string
     mssqlQueryFile: string
     postgresQuery: string
+    httpDirsWordlist: string
+    httpFilesWordlist: string
+    httpVhostsWordlist: string
+    httpSubdomainsWordlist: string
+    httpExtensions: seq[string]
+    httpStatusAllow: seq[int]
+    httpStatusHide: seq[int]
+    httpBaseline: bool
+    httpFollowRedirects: bool
+    httpMethod: string
+    httpUserAgent: string
+    httpHeaders: seq[string]
+    httpRatePerSec: int
+    httpResumeFile: string
+    httpMatchRegex: string
+    httpFilterRegex: string
+    httpMatchLength: seq[tuple[lo, hi: int]]
+    httpFilterLength: seq[tuple[lo, hi: int]]
+    httpAutoCalibrate: bool
+    httpExtractLinks: bool
+    httpRecursion: bool
+    httpDepth: int
     useSsl: bool
     kerberos: bool
     kerberosDelegate: bool
     localAuth: bool
     shares: bool
+    smbSpider: bool
+    smbSpiderPattern: string
+    smbSpiderMaxDepth: int
+    smbSpiderSizeLimit: int64
+    smbSpiderInteresting: bool
     users: bool
     groups: bool
     passwordPolicy: bool
@@ -515,6 +542,13 @@ ENUMERATION (require -u/-p or -H)
   --rid-brute [n]    LSARPC RID brute, optional max RID (default 4000)
   --lookupsid [n]     Impacket-lookupsid style alias for --rid-brute
   --rid-range <a-b>    Explicit RID brute range, e.g. 500-1500
+  --spider             Read-only recursive share crawler
+  --share <name>       Share to spider (if omitted, readable disk shares are discovered)
+  --remote <path>      Start path inside the share (default: share root)
+  --max-depth <n>      Spider recursion depth (default 3)
+  --spider-pattern <p> Comma-separated wildcard filters, e.g. "*.kdbx,*pass*"
+  --size-limit <bytes> Skip file matches larger than this size
+  --interesting        Use built-in credential/config/document filename patterns
   --coerce --listener <fqdn>
                        Trigger MS-RPRN coercion to the listener
   --coerce-target <s>  Spooler host to coerce when main target is the listener
@@ -539,6 +573,9 @@ OUTPUT
 EXAMPLES
   nimux smb dc01 -u alice -p 'Pass123!' --shares --users --pass-pol
   nimux smb dc01 -u alice -H aad3b...:31d6c... --rid-brute 5000
+  nimux smb files01 -u alice -p '<password>' --spider --max-depth 3 --interesting
+  nimux smb files01 -u alice -p '<password>' --spider --share Shared \
+      --spider-pattern '*.kdbx,*.config,*password*' --json
   nimux smb <listener-host>.FOREST.AD -u Administrator -H <nthash> -d FOREST.AD \
       --coerce --coerce-target <spooler-host>.CHILD.FOREST.AD \
       --listener <listener-host>.FOREST.AD \
@@ -965,9 +1002,9 @@ CLI COMMANDS
 
 EXAMPLES
   nimux ftp 10.0.0.5
-  nimux ftp 10.0.0.5 -u akira -p chokochoko
-  nimux ftp 10.0.0.5 -u akira -p chokochoko --ls
-  nimux ftp 10.0.0.5 -u akira -p chokochoko --cli
+  nimux ftp 10.0.0.5 -u <user> -p '<password>'
+  nimux ftp 10.0.0.5 -u <user> -p '<password>' --ls
+  nimux ftp 10.0.0.5 -u <user> -p '<password>' --cli
 """
 
 proc usageMysql() =
@@ -996,7 +1033,7 @@ CLI COMMANDS
   <sql> \              Continue SQL on the next line
 
 EXAMPLES
-  nimux mysql 10.0.0.5 -u akira -p chokochoko
+  nimux mysql 10.0.0.5 -u <user> -p '<password>'
   nimux mysql 10.0.0.5 -u root -p ''
   nimux mysql 10.0.0.5 -u root -p '' --cli
 """
@@ -1041,11 +1078,11 @@ SHELL COMMANDS
   <command>            Run OS command via COPY FROM PROGRAM
 
 EXAMPLES
-  nimux postgres 10.0.0.5 -u postgres -p chokochoko
-  nimux postgres 10.0.0.5 -u postgres -p chokochoko --query "SELECT version()"
-  nimux postgres 10.0.0.5 -u postgres -p chokochoko --cmd "id"
-  nimux postgres 10.0.0.5 -u postgres -p chokochoko --shell
-  nimux postgres 10.0.0.5 -u postgres -p chokochoko --database template1 --cli
+  nimux postgres 10.0.0.5 -u postgres -p '<password>'
+  nimux postgres 10.0.0.5 -u postgres -p '<password>' --query "SELECT version()"
+  nimux postgres 10.0.0.5 -u postgres -p '<password>' --cmd "id"
+  nimux postgres 10.0.0.5 -u postgres -p '<password>' --shell
+  nimux postgres 10.0.0.5 -u postgres -p '<password>' --database template1 --cli
 """
 
 proc usageNfs() =
@@ -1095,6 +1132,33 @@ AUTHENTICATION
 
 OPTIONS
   --path <s>           Request path (default: /)
+  --dirs <file>        Directory wordlist; request /word
+  --files <file>       File wordlist; request /word and /word.<ext>
+  --vhosts <file>      Virtual-host wordlist; request Host: word.<target>
+  --subdomains <file>  DNS subdomain wordlist; use with `nimux dns <domain>`
+  --extensions <csv>   File extensions for --files, e.g. php,txt,bak
+  --status <csv>       Only show these status codes, e.g. 200,204,301,302,403
+  --hide-status <csv>  Hide these status codes, e.g. 404,400
+  --baseline           Suppress wildcard and soft-404 lookalike responses
+  --auto-calibrate     Probe random paths/vhosts and suppress matching responses
+  --extract-links      Extract same-host links/forms/scripts from HTML responses
+  --recursion          Recurse into discovered directories and extracted links
+  --depth <n>          Recursion depth for --recursion (default: 1)
+  --match-regex <re>   Only show responses matching regex
+  --filter-regex <re>  Hide responses matching regex
+  --match-length <n|a-b,csv>
+                       Only show body lengths matching exact values/ranges
+  --filter-length <n|a-b,csv>
+                       Hide body lengths matching exact values/ranges
+  -fs, --filter-size <n|a-b,csv>
+                       Alias for --filter-length; useful for default response size
+  --follow-redirects   Follow same-host relative redirects
+  --method <verb>      HTTP method (default: GET)
+  --user-agent <s>     User-Agent header (default: nimux/0.1)
+  --header <h>         Extra header, repeatable, e.g. 'X-Test: 1'
+  --rate <n>           Approximate per-target request rate limit
+  --resume <jsonl>     Skip discoveries already present in prior JSONL output
+  --workers <n>        Concurrent workers (alias for --concurrency)
   --ssl                Use TLS for `http` (implicit for `https`)
   --port <n>           Custom port (default: 80 / 443)
   --json               Emit JSON
@@ -1102,7 +1166,12 @@ OPTIONS
 EXAMPLES
   nimux http 10.0.0.5
   nimux http 10.0.0.5 --path /admin
-  nimux https 10.0.0.5 -u akira -p chokochoko --path /dav/
+  nimux http app.htb --dirs raft-small-words.txt --workers 100 --status 200,301,302,403 --baseline
+  nimux http app.htb --dirs raft-small-words.txt --auto-calibrate --recursion --depth 2 --extract-links
+  nimux http app.htb --files raft-small-files.txt --extensions php,txt --filter-regex 'Not Found' -fs 325 --resume seen.jsonl
+  nimux http 10.0.0.5 --vhosts vhosts.txt -d app.htb --workers 100
+  nimux dns app.htb --subdomains subdomains.txt --workers 200
+  nimux https 10.0.0.5 -u <user> -p '<password>' --path /dav/
 """
 
 proc usageSsh() =
@@ -1121,9 +1190,9 @@ EXECUTION
   --shell              Open an interactive shell session
 
 EXAMPLES
-  nimux ssh 10.0.0.5 -u akira -p chokochoko
-  nimux ssh 10.0.0.5 -u akira -p chokochoko --cmd "id"
-  nimux ssh 10.0.0.5 -u akira -p chokochoko --shell
+  nimux ssh 10.0.0.5 -u <user> -p '<password>'
+  nimux ssh 10.0.0.5 -u <user> -p '<password>' --cmd "id"
+  nimux ssh 10.0.0.5 -u <user> -p '<password>' --shell
 """
 
 proc usageAfp() =
@@ -1156,8 +1225,8 @@ CLI COMMANDS
 
 EXAMPLES
   nimux afp 10.0.0.5
-  nimux afp 10.0.0.5 -u akira -p chokochoko
-  nimux afp 10.0.0.5 -u akira -p chokochoko --cli
+  nimux afp 10.0.0.5 -u <user> -p '<password>'
+  nimux afp 10.0.0.5 -u <user> -p '<password>' --cli
 """
 
 proc usageWebDav() =
@@ -1190,10 +1259,10 @@ CLI COMMANDS
 
 EXAMPLES
   nimux webdav 10.0.0.5
-  nimux webdav 10.0.0.5 -u akira -p chokochoko
+  nimux webdav 10.0.0.5 -u <user> -p '<password>'
   nimux webdav 10.0.0.5 --ssl
-  nimux webdav 10.0.0.5 --ssl -u akira -p chokochoko
-  nimux webdav 10.0.0.5 --ssl -u akira -p chokochoko --cli
+  nimux webdav 10.0.0.5 --ssl -u <user> -p '<password>'
+  nimux webdav 10.0.0.5 --ssl -u <user> -p '<password>' --cli
 """
 
 proc usageVnc() =
@@ -1207,7 +1276,7 @@ AUTHENTICATION
   -p, --password <s>   VNC password
 
 EXAMPLES
-  nimux vnc 10.0.0.5 -p chokochoko
+  nimux vnc 10.0.0.5 -p '<password>'
   nimux vnc 10.0.0.5
 """
 
@@ -1288,7 +1357,7 @@ proc usage(forCommand = "") =
   of "afp": usageAfp(); return
   of "nfs": usageNfs(); return
   of "webdav": usageWebDav(); return
-  of "http", "https": usageHttp(); return
+  of "http", "https", "dns": usageHttp(); return
   of "socks": usageSocks(); return
   of "krb5conf", "krb5": usageKrb5Conf(); return
   of "kerberos": usageKerberos(); return
@@ -1655,7 +1724,8 @@ COMMANDS
   nfs       NFS/RPC portmapper probe, service enum, export listing
   afp       AFP (Apple Filing Protocol) server info and authentication
   webdav    WebDAV/WebDAVS authentication check and resource listing
-  http      HTTP/HTTPS probe, headers, title, and body fingerprinting
+  http      HTTP/HTTPS probe, headers, title, dirs/files, and vhosts
+  dns       Lightweight DNS subdomain enumeration
   winrm     WinRM auth check + remote command execution (NTLM / Kerberos)
   mssql     MSSQL prelogin + Login7 auth, raw T-SQL queries, xp_cmdshell
   rdp       RDP probe with TLS cert + NTLM-info (nmap rdp-ntlm-info parity)
@@ -1761,6 +1831,13 @@ EXAMPLES
     nimux scan dc01 --udp --port 53,88,123,137,161,464
     nimux scan 2001:db8::1 --port 22,80,443
 
+  Web discovery
+    nimux http app.htb --dirs raft-small-words.txt --workers 100 --status 200,301,302,403 --baseline
+    nimux http app.htb --dirs raft-small-words.txt --auto-calibrate --recursion --depth 2 --extract-links
+    nimux http app.htb --files raft-small-files.txt --extensions php,txt,bak --workers 100 --filter-regex 'Not Found' -fs 325
+    nimux http 10.0.0.5 --vhosts vhosts.txt -d app.htb --workers 100 --resume seen.jsonl --json
+    nimux dns app.htb --subdomains subdomains.txt --workers 200 --json
+
   SMB / AD enumeration
     nimux smb dc01 -u alice -p Pass123! --shares --users --pass-pol
     nimux smb dc01 -u alice -H aad3b...:31d6c... --rid-brute 5000
@@ -1817,6 +1894,24 @@ proc parsePortSpec(value: string): seq[int] =
         raise newException(ValueError, "port out of range: " & $port)
       if port notin result:
         result.add port
+
+proc parseIntRanges(value, optName: string): seq[tuple[lo, hi: int]] =
+  for item in value.split(','):
+    let clean = item.strip()
+    if clean.len == 0:
+      continue
+    if "-" in clean:
+      let parts = clean.split('-', 1)
+      if parts.len != 2 or parts[0].strip().len == 0 or parts[1].strip().len == 0:
+        raise newException(ValueError, optName & " expects n or a-b ranges")
+      let lo = parseInt(parts[0].strip())
+      let hi = parseInt(parts[1].strip())
+      result.add (min(lo, hi), max(lo, hi))
+    else:
+      let n = parseInt(clean)
+      result.add (n, n)
+  if result.len == 0:
+    raise newException(ValueError, optName & " expects at least one value")
 
 const CommonScanPorts = [
   21, 22, 23, 25, 53, 80, 88, 110, 111, 135, 139, 143, 389, 443, 445,
@@ -2071,10 +2166,18 @@ proc parseCli(): CliConfig =
   result.krb5Rid = 500'u32
   result.smbCaptureSeconds = 15
   result.smbCaptureInterval = 1
+  result.httpMethod = "GET"
+  result.httpUserAgent = "nimux/0.1"
+  result.httpDepth = 1
+  result.smbSpiderMaxDepth = 3
 
   const valueShort = {'u', 'p', 'H', 'd'}
   const valueLong = ["username", "password", "hash", "domain", "port",
-    "concurrency", "timeout", "cmd", "command", "dialects", "path",
+    "concurrency", "workers", "timeout", "cmd", "command", "dialects", "path",
+    "dirs", "files", "vhosts", "subdomains", "extensions", "status", "hide-status",
+    "match-regex", "filter-regex", "match-length", "filter-length", "filter-size",
+    "method", "user-agent", "header", "headers", "rate", "resume", "depth",
+    "spider-pattern", "max-depth", "size-limit",
     "spray-delay", "max-attempts-per-user",
     "encrypt", "rdp-proto", "rid-range", "limit", "query", "base", "filter", "attrs",
     "fields", "create", "name", "dn", "add", "replace", "delete", "set", "count", "mapping",
@@ -2120,6 +2223,10 @@ proc parseCli(): CliConfig =
         normalized.add token & ":" & rawArgs[index + 1]
         inc index, 2
         consumed = true
+    if not consumed and token == "-fs" and index + 1 < rawArgs.len:
+      normalized.add "--filter-size:" & rawArgs[index + 1]
+      inc index, 2
+      consumed = true
     if not consumed and token.len >= 2 and token[0] == '-' and token[1] != '-' and
         ':' notin token and '=' notin token and token.len == 2 and
         token[1] in valueShort and index + 1 < rawArgs.len:
@@ -2156,7 +2263,8 @@ proc parseCli(): CliConfig =
       "user-process",
       "enum-danger", "enum-impersonate", "enable-xp", "enable-ole", "enable-clr",
       "success", "coerce", "capture-tickets", "attack", "set-scriptpath", "kill",
-      "kerberos-delegate", "set-hash", "raw-ticket"]
+      "baseline", "auto-calibrate", "extract-links", "recursion", "follow-redirects",
+      "spider", "interesting", "kerberos-delegate", "set-hash", "raw-ticket"]
   )
   for kind, key, value in parser.getopt():
     case kind
@@ -2175,6 +2283,8 @@ proc parseCli(): CliConfig =
         if result.ports.len > 0:
           result.port = result.ports[0]
       of "concurrency":
+        result.concurrency = parseInt(value)
+      of "workers":
         result.concurrency = parseInt(value)
       of "timeout":
         result.timeoutMs = parseInt(value)
@@ -2238,6 +2348,12 @@ proc parseCli(): CliConfig =
           result.remotePath = value
       of "local":
         result.localPath = value
+      of "spider-pattern":
+        result.smbSpiderPattern = value
+      of "max-depth":
+        result.smbSpiderMaxDepth = max(0, parseInt(value))
+      of "size-limit":
+        result.smbSpiderSizeLimit = max(0'i64, parseBiggestInt(value))
       of "T":
         case value
         of "0":
@@ -2307,6 +2423,62 @@ proc parseCli(): CliConfig =
         result.mssqlClrCommand = value
       of "query-file":
         result.mssqlQueryFile = value
+      of "dirs":
+        result.httpDirsWordlist = value
+      of "files":
+        result.httpFilesWordlist = value
+      of "vhosts":
+        result.httpVhostsWordlist = value
+      of "subdomains":
+        result.httpSubdomainsWordlist = value
+      of "extensions":
+        result.httpExtensions = @[]
+        for item in value.split(','):
+          let clean = item.strip(chars = {'.', ' ', '\t', '\r', '\n'})
+          if clean.len > 0:
+            result.httpExtensions.add clean
+      of "status":
+        result.httpStatusAllow = @[]
+        for item in value.split(','):
+          let clean = item.strip()
+          if clean.len > 0:
+            result.httpStatusAllow.add parseInt(clean)
+      of "hide-status":
+        result.httpStatusHide = @[]
+        for item in value.split(','):
+          let clean = item.strip()
+          if clean.len > 0:
+            result.httpStatusHide.add parseInt(clean)
+      of "baseline":
+        result.httpBaseline = true
+      of "auto-calibrate":
+        result.httpAutoCalibrate = true
+      of "extract-links":
+        result.httpExtractLinks = true
+      of "recursion":
+        result.httpRecursion = true
+      of "follow-redirects":
+        result.httpFollowRedirects = true
+      of "match-regex":
+        result.httpMatchRegex = value
+      of "filter-regex":
+        result.httpFilterRegex = value
+      of "match-length":
+        result.httpMatchLength = parseIntRanges(value, "--match-length")
+      of "filter-length", "filter-size":
+        result.httpFilterLength = parseIntRanges(value, "--" & key)
+      of "method":
+        result.httpMethod = value.strip().toUpperAscii()
+      of "user-agent":
+        result.httpUserAgent = value
+      of "header", "headers":
+        result.httpHeaders.add value
+      of "rate":
+        result.httpRatePerSec = parseInt(value)
+      of "resume":
+        result.httpResumeFile = value
+      of "depth":
+        result.httpDepth = parseInt(value)
       of "xp-link":
         result.mssqlXpLinkServer = value
       of "ole-link":
@@ -2383,6 +2555,10 @@ proc parseCli(): CliConfig =
         result.localAuth = true
       of "shares":
         result.shares = true
+      of "spider":
+        result.smbSpider = true
+      of "interesting":
+        result.smbSpiderInteresting = true
       of "users":
         result.users = true
       of "groups":
@@ -2899,6 +3075,8 @@ proc parseCli(): CliConfig =
   if result.protocol.len == 0:
     usage()
     quit 1
+  if result.protocol in ["http", "https"] and result.winRmPath == "/wsman":
+    result.winRmPath = "/"
 
   if result.concurrency < 1:
     raise newException(ValueError, "concurrency must be >= 1")
@@ -2906,6 +3084,15 @@ proc parseCli(): CliConfig =
     raise newException(ValueError, "timeout must be >= 1")
   if result.retries < 0:
     raise newException(ValueError, "retries must be >= 0")
+  if result.httpRatePerSec < 0:
+    raise newException(ValueError, "--rate must be >= 0")
+  if result.httpDepth < 0:
+    raise newException(ValueError, "--depth must be >= 0")
+  if result.httpMethod.len == 0:
+    result.httpMethod = "GET"
+  for ch in result.httpMethod:
+    if ch notin {'A'..'Z', '0'..'9', '_', '-'}:
+      raise newException(ValueError, "--method contains invalid character: " & $ch)
   if result.port == 0:
     case result.protocol
     of "smb", "scm", "bin", "tsch", "put", "get", "ls", "rm", "mkdir", "dcsync", "secrets":
@@ -2925,6 +3112,8 @@ proc parseCli(): CliConfig =
       result.port = result.ports[0]
     of "ldap":
       result.port = 389
+    of "dns":
+      result.port = 53
     of "winrm":
       result.port = if result.useSsl: 5986 else: 5985
     of "mssql":
@@ -3329,6 +3518,202 @@ proc smbRequests(config: CliConfig): smbclient.SmbEnumRequests =
     localAdmins: config.localAdmins
   )
 
+proc smbWildcardMatch(pattern, text: string): bool =
+  let p = pattern.toLowerAscii()
+  let s = text.toLowerAscii()
+  var pi = 0
+  var si = 0
+  var star = -1
+  var match = 0
+  while si < s.len:
+    if pi < p.len and (p[pi] == '?' or p[pi] == s[si]):
+      inc pi
+      inc si
+    elif pi < p.len and p[pi] == '*':
+      star = pi
+      match = si
+      inc pi
+    elif star >= 0:
+      pi = star + 1
+      inc match
+      si = match
+    else:
+      return false
+  while pi < p.len and p[pi] == '*':
+    inc pi
+  pi == p.len
+
+proc splitSmbPatterns(patterns: string; interesting: bool): seq[string] =
+  if interesting:
+    for p in ["*password*", "*passwd*", "*cred*", "*credential*", "*secret*",
+        "*token*", "*apikey*", "*api-key*", "*backup*", "*dump*", "*wallet*",
+        "*.kdbx", "*.1password", "*.agilekeychain", "*.keychain", "*.plist",
+        "*.config", "*.conf", "*.cfg", "*.ini", "*.env", "*.properties",
+        "*.yaml", "*.yml", "*.json", "*.xml", "*.toml", "*.cnf",
+        "web.config", "app.config", "appsettings*.json", "settings*.json",
+        "*.ps1", "*.psm1", "*.psd1", "*.bat", "*.cmd", "*.vbs", "*.js",
+        "*.jse", "*.wsf", "*.sh", "*.bash", "*.zsh", "*.fish", "*.py",
+        "*.rb", "*.pl", "*.php", "*.asp", "*.aspx", "*.jsp",
+        "*.rdp", "*.ovpn", "*.vpn", "*.pcf", "*.kubeconfig", "config",
+        "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "*.pem", "*.key",
+        "*.pfx", "*.p12", "*.cer", "*.crt", "*.csr", "*.jks", "*.keystore",
+        "*.txt", "*.log", "*.csv", "*.pdf", "*.doc", "*.docx", "*.xls",
+        "*.xlsx", "*.ppt", "*.pptx", "*.rtf", "*.odt", "*.ods",
+        "*.zip", "*.7z", "*.rar", "*.tar", "*.gz", "*.tgz", "*.bz2",
+        "*.xz", "*.bak", "*.old", "*.orig", "*.save", "*.tmp", "*.swp",
+        "*.sql", "*.sqlite", "*.sqlite3", "*.db", "*.mdb", "*.accdb",
+        "*.exe", "*.dll", "*.msi", "*.iso", "*.dmg", "*.pkg", "*.deb",
+        "*.rpm", "*.app", "*.appimage"]:
+      result.add p
+  for item in patterns.split(','):
+    let clean = item.strip()
+    if clean.len > 0:
+      result.add clean
+
+proc smbEntryMatches(entryPath, entryName: string; patterns: seq[string]): bool =
+  if patterns.len == 0:
+    return true
+  for p in patterns:
+    if smbWildcardMatch(p, entryName) or smbWildcardMatch(p, entryPath):
+      return true
+  false
+
+proc smbSpiderProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
+  let credential = smbCredential(config)
+  let authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm
+  var shares: seq[string]
+  var shareProbeMessage = ""
+  if config.shareName.len > 0:
+    shares.add config.shareName
+  else:
+    var shareReq = smbRequests(config)
+    shareReq.shares = true
+    var request = smbNegotiateRequest(config)
+    let probe = await smbclient.probeSmb(host, config.port, max(config.timeoutMs, 5000),
+      request, credential, true, shareReq)
+    shareProbeMessage = probe.message
+    for share in probe.shares:
+      let isDisk = (share.typ and 0x0f) == 0
+      let isAdmin = share.name.endsWith("$")
+      if isDisk and share.canRead and not isAdmin:
+        shares.add share.name
+  if shares.len == 0:
+    return %*{
+      "protocol": "smb",
+      "operation": "spider",
+      "host": host,
+      "port": config.port,
+      "success": false,
+      "authenticated": false,
+      "shares_checked": 0,
+      "root": config.remotePath.strip(chars = {'\\', '/'}),
+      "max_depth": config.smbSpiderMaxDepth,
+      "patterns": splitSmbPatterns(config.smbSpiderPattern, config.smbSpiderInteresting),
+      "dirs_visited": 0,
+      "files_seen": 0,
+      "dirs_seen": 0,
+      "matched": 0,
+      "entries": [],
+      "errors": [],
+      "message": if shareProbeMessage.len > 0: shareProbeMessage else: "no readable disk shares found; use --share <name> to spider a specific share"
+    }
+  var session: smbclient.SmbSession
+  try:
+    session = await smbclient.establishSmbSession(host, config.port,
+      max(config.timeoutMs, 5000), credential, authMethod)
+  except CatchableError as error:
+    return %*{
+      "protocol": "smb", "operation": "spider", "host": host,
+      "port": config.port, "success": false, "authenticated": false,
+      "shares_checked": shares.len,
+      "root": config.remotePath.strip(chars = {'\\', '/'}),
+      "max_depth": config.smbSpiderMaxDepth,
+      "patterns": splitSmbPatterns(config.smbSpiderPattern, config.smbSpiderInteresting),
+      "dirs_visited": 0, "files_seen": 0, "dirs_seen": 0, "matched": 0,
+      "message": error.msg.splitLines()[0], "entries": [], "errors": []
+    }
+  if session == nil or not session.authenticated:
+    return %*{
+      "protocol": "smb", "operation": "spider", "host": host,
+      "port": config.port, "success": false, "authenticated": false,
+      "shares_checked": shares.len,
+      "root": config.remotePath.strip(chars = {'\\', '/'}),
+      "max_depth": config.smbSpiderMaxDepth,
+      "patterns": splitSmbPatterns(config.smbSpiderPattern, config.smbSpiderInteresting),
+      "dirs_visited": 0, "files_seen": 0, "dirs_seen": 0, "matched": 0,
+      "message": if session == nil: "no session" else: session.message,
+      "entries": [], "errors": []
+    }
+  let patterns = splitSmbPatterns(config.smbSpiderPattern, config.smbSpiderInteresting)
+  let root = config.remotePath.strip(chars = {'\\', '/'})
+  var entries = newJArray()
+  var errors = newJArray()
+  var dirsVisited = 0
+  var filesSeen = 0
+  var dirsSeen = 0
+  var matched = 0
+  for share in shares:
+    var pending: seq[tuple[path: string; depth: int]] = @[(root, 0)]
+    while pending.len > 0:
+      let current = pending[^1]
+      pending.setLen(pending.len - 1)
+      inc dirsVisited
+      let listing = await smbclient.listShareDirectory(session, share, current.path)
+      if listing.status != 0:
+        errors.add %*{
+          "share": share,
+          "path": current.path,
+          "status": "0x" & listing.status.toHex(8),
+          "message": listing.message
+        }
+        continue
+      for entry in listing.entries:
+        let childPath =
+          if current.path.len > 0: current.path & "\\" & entry.name else: entry.name
+        if entry.isDirectory:
+          inc dirsSeen
+          if current.depth < config.smbSpiderMaxDepth and
+              (entry.attributes and FileAttributeReparsePoint) == 0:
+            pending.add (childPath, current.depth + 1)
+        else:
+          inc filesSeen
+        let tooLarge = config.smbSpiderSizeLimit > 0 and
+          not entry.isDirectory and entry.size > config.smbSpiderSizeLimit
+        if not tooLarge and smbEntryMatches(childPath, entry.name, patterns):
+          inc matched
+          entries.add %*{
+            "share": share,
+            "path": childPath,
+            "name": entry.name,
+            "depth": current.depth,
+            "size": entry.size,
+            "is_directory": entry.isDirectory,
+            "attributes": "0x" & entry.attributes.toHex(8)
+          }
+  asyncnet.close(session.ctx.socket)
+  return %*{
+    "protocol": "smb",
+    "operation": "spider",
+    "host": host,
+    "port": config.port,
+    "success": true,
+    "authenticated": true,
+    "shares": shares,
+    "shares_checked": shares.len,
+    "root": root,
+    "max_depth": config.smbSpiderMaxDepth,
+    "patterns": patterns,
+    "interesting": config.smbSpiderInteresting,
+    "size_limit": config.smbSpiderSizeLimit,
+    "dirs_visited": dirsVisited,
+    "files_seen": filesSeen,
+    "dirs_seen": dirsSeen,
+    "matched": matched,
+    "entries": entries,
+    "errors": errors,
+    "message": "SMB spider completed"
+  }
+
 proc ndrWstr(s: string): string =
   let wchars = s.len + 1
   result.add char(wchars and 0xff); result.add char((wchars shr 8) and 0xff)
@@ -3531,6 +3916,68 @@ proc smbProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
     elif lastSessionMessage.len > 0:
       probe.authAttempted = true
       probe.message = lastSessionMessage
+  if config.shares and not credential.hasCredential() and not config.kerberos and
+      probe.shares.len == 0:
+    var session: smbclient.SmbSession
+    try:
+      session = await smbclient.establishSmbSession(
+        host, config.port, max(config.timeoutMs, 5000), credential,
+        smbclient.samNtlm)
+      if session != nil and session.authenticated and session.ctx != nil:
+        probe.host = host
+        probe.port = config.port
+        probe.reachable = true
+        probe.speaksSmb = true
+        probe.status = 0
+        probe.negotiate = session.negotiate
+        probe.authAttempted = true
+        probe.authenticated = true
+        probe.signingEnabled = session.negotiate.signingRequired or
+          session.negotiate.signingEnabled
+        probe.signingApplied = probe.signingEnabled
+        probe.ipcTree = smbclient.SmbTreeConnectInfo(
+          attempted: true,
+          connected: session.ipcTreeId != 0,
+          status: if session.ipcTreeId != 0: 0'u32 else: 0xC0000022'u32,
+          treeId: session.ipcTreeId)
+        let pipe = await smbclient.openSmbPipe(session.ctx, "srvsvc")
+        probe.srvsvcPipe = pipe
+        if pipe.opened:
+          let bindAck = await smbclient.rpcBindPipe(session.ctx, pipe,
+            smbclient.buildDceRpcBindSrvSvc(40'u32))
+          probe.srvsvcRpc = bindAck
+          if bindAck.bound:
+            let r = await smbclient.rpcCallEx(session.ctx, pipe, 15'u16,
+              smbclient.buildSrvSvcNetShareEnumAllStub(host), 41'u32)
+            if r.stub.len > 0:
+              probe.shares = smbclient.parseSrvSvcNetShareEnumAll(r.stub)
+              for index in 0 ..< probe.shares.len:
+                let treeId = await smbclient.connectShareTree(session,
+                  probe.shares[index].name)
+                probe.shares[index].accessProbed = true
+                if treeId != 0:
+                  probe.shares[index].accessStatus = 0
+                  probe.shares[index].canRead = true
+                  probe.shares[index].canWrite = false
+                else:
+                  probe.shares[index].accessStatus = 0xffffffff'u32
+              probe.message = "SMB anonymous IPC$ connected, SRVSVC shares parsed: " &
+                $probe.shares.len
+            elif r.faultStatus != 0:
+              probe.message = "anonymous NetShareEnumAll RPC fault 0x" &
+                r.faultStatus.toHex(8)
+            else:
+              probe.message = "anonymous NetShareEnumAll returned empty response"
+          else:
+            probe.message = "anonymous SRVSVC bind failed"
+        else:
+          probe.message = "anonymous srvsvc pipe open failed 0x" &
+            pipe.status.toHex(8)
+    except CatchableError as error:
+      probe.message = error.msg.splitLines()[0]
+    finally:
+      if session != nil and session.ctx != nil and session.ctx.socket != nil:
+        asyncnet.close(session.ctx.socket)
   var sharesJson = newJArray()
   var sessionsArr = newJArray()
   for entry in probe.sessions.entries:
@@ -10471,6 +10918,381 @@ proc postgresProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async
                              "ok": ok, "error": err}
 
 proc httpProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
+  proc loadWords(path: string): seq[string] =
+    if path.len == 0:
+      return
+    if not fileExists(path):
+      raise newException(IOError, "wordlist not found: " & path)
+    var seen = initHashSet[string]()
+    for line in lines(path):
+      let word = line.strip()
+      if word.len == 0 or word.startsWith("#"):
+        continue
+      if word notin seen:
+        seen.incl word
+        result.add word
+
+  proc normalizeBasePath(path: string): string =
+    result = if path.len > 0: path else: "/"
+    if not result.startsWith("/"):
+      result = "/" & result
+    if result.len > 1:
+      result = result.strip(chars = {'/'}, leading = false)
+
+  proc joinHttpPath(basePath, word: string): string =
+    let clean = word.strip(chars = {'/', ' ', '\t', '\r', '\n'})
+    let base = normalizeBasePath(basePath)
+    if clean.len == 0:
+      return base
+    if base == "/":
+      "/" & clean
+    else:
+      base & "/" & clean
+
+  proc statusAllowed(status: int; config: CliConfig): bool =
+    if status <= 0:
+      return false
+    if config.httpStatusAllow.len > 0:
+      return status in config.httpStatusAllow
+    if status in config.httpStatusHide:
+      return false
+    status in [200, 201, 202, 204, 206, 301, 302, 307, 308, 401, 403]
+
+  proc domainForHost(host: string; config: CliConfig): string =
+    if config.domain.len > 0:
+      config.domain.strip()
+    else:
+      host.strip()
+
+  let hasHttpEnum =
+    config.httpDirsWordlist.len > 0 or config.httpFilesWordlist.len > 0 or
+    config.httpVhostsWordlist.len > 0 or config.httpExtractLinks
+  if hasHttpEnum:
+    type HttpCheck = tuple[kind, path, hostHeader: string, depth: int]
+    var checks: seq[HttpCheck]
+    var queued = initHashSet[string]()
+
+    proc checkKey(kind, path, hostHeader: string): string =
+      kind & "\t" & hostHeader & "\t" & path
+
+    proc enqueue(kind, path, hostHeader: string; depth: int) =
+      let cleanPath =
+        if path.len > 1 and path.endsWith("/"): path
+        else: normalizeBasePath(path)
+      let key = checkKey(kind, cleanPath, hostHeader)
+      if key notin queued:
+        queued.incl key
+        checks.add (kind, cleanPath, hostHeader, depth)
+
+    for word in loadWords(config.httpDirsWordlist):
+      enqueue("dir", joinHttpPath(config.winRmPath, word), "", 0)
+    let fileWords = loadWords(config.httpFilesWordlist)
+    for word in fileWords:
+      enqueue("file", joinHttpPath(config.winRmPath, word), "", 0)
+      for ext in config.httpExtensions:
+        enqueue("file", joinHttpPath(config.winRmPath, word & "." & ext), "", 0)
+    let vhostDomain = domainForHost(host, config)
+    for word in loadWords(config.httpVhostsWordlist):
+      let clean = word.strip()
+      if clean.len == 0:
+        continue
+      let vhost =
+        if clean.contains("."): clean
+        else: clean & "." & vhostDomain
+      enqueue("vhost", normalizeBasePath(config.winRmPath), vhost, 0)
+    if config.httpExtractLinks and checks.len == 0:
+      enqueue("page", normalizeBasePath(config.winRmPath), "", 0)
+
+    type HttpSig = object
+      status: int
+      length: int
+      title: string
+      location: string
+      snippet: string
+
+    proc responseText(item: HttpCheck;
+                      r: httpclient.HttpResult): string =
+      result = item.kind & "\n" & item.path & "\n" & item.hostHeader & "\n" &
+        $r.statusCode & "\n" & r.reason & "\n" & r.server & "\n" &
+        r.location & "\n" & r.contentType & "\n" & r.title & "\n" &
+        r.headers & "\n" & r.bodySnippet
+
+    proc lengthMatches(ranges: seq[tuple[lo, hi: int]]; length: int): bool =
+      if ranges.len == 0:
+        return false
+      for item in ranges:
+        if length >= item.lo and length <= item.hi:
+          return true
+
+    proc sigOf(r: httpclient.HttpResult): HttpSig =
+      HttpSig(status: r.statusCode, length: r.bodyLength, title: r.title,
+              location: r.location, snippet: r.bodySnippet)
+
+    proc similarToBaseline(sig: HttpSig; bases: seq[HttpSig]): bool =
+      for base in bases:
+        let tolerance = max(32, max(base.length, sig.length) div 20)
+        if sig.status == base.status and sig.title == base.title and
+            sig.location == base.location and abs(sig.length - base.length) <= tolerance:
+          return true
+
+    proc loadResumeSeen(path: string): HashSet[string] =
+      if path.len == 0:
+        return
+      if not fileExists(path):
+        return
+      for line in lines(path):
+        let clean = line.strip()
+        if clean.len == 0:
+          continue
+        try:
+          let node = parseJson(clean)
+          let discoveries = node{"discoveries"}
+          if discoveries != nil:
+            for item in discoveries:
+              let kind = item{"kind"}.getStr()
+              let p = item{"path"}.getStr()
+              let hh = item{"host_header"}.getStr()
+              if kind.len > 0 and p.len > 0:
+                result.incl checkKey(kind, p, hh)
+          else:
+            let kind = node{"kind"}.getStr()
+            let p = node{"path"}.getStr()
+            let hh = node{"host_header"}.getStr()
+            if kind.len > 0 and p.len > 0:
+              result.incl checkKey(kind, p, hh)
+        except CatchableError:
+          discard
+
+    proc currentDir(path: string): string =
+      var p = if path.len > 0: path else: "/"
+      if not p.startsWith("/"):
+        p = "/" & p
+      if p == "/":
+        return "/"
+      if p.endsWith("/"):
+        return p
+      let slash = p.rfind('/')
+      if slash <= 0:
+        return "/"
+      p[0 .. slash]
+
+    proc joinRelativePath(basePath, rel: string): string =
+      let clean = rel.strip()
+      if clean.len == 0:
+        return ""
+      if clean.startsWith("/"):
+        return normalizeBasePath(clean)
+      var base = currentDir(basePath)
+      if not base.endsWith("/"):
+        base.add "/"
+      let joined = base & clean
+      if clean.endsWith("/"):
+        joined
+      else:
+        normalizeBasePath(joined)
+
+    proc sameHostUrlToPath(raw, currentPath, effectiveHost: string): string =
+      var value = raw.strip()
+      if value.len == 0:
+        return ""
+      let hashPos = value.find('#')
+      if hashPos >= 0:
+        value = value[0 ..< hashPos]
+      let queryPos = value.find('?')
+      if queryPos >= 0:
+        value = value[0 ..< queryPos]
+      value = value.strip()
+      if value.len == 0 or value.startsWith("javascript:") or
+          value.startsWith("mailto:") or value.startsWith("tel:") or
+          value.startsWith("data:") or value.startsWith("//"):
+        return ""
+      if value.startsWith("http://") or value.startsWith("https://"):
+        try:
+          let u = parseUri(value)
+          if u.hostname.cmpIgnoreCase(effectiveHost) != 0 and
+              u.hostname.cmpIgnoreCase(host) != 0:
+            return ""
+          return normalizeBasePath(if u.path.len > 0: u.path else: "/")
+        except CatchableError:
+          return ""
+      joinRelativePath(currentPath, value)
+
+    proc extractHtmlLinks(body, currentPath, effectiveHost: string): seq[string] =
+      var seen = initHashSet[string]()
+      let lower = body.toLowerAscii()
+      for attr in ["href", "src", "action"]:
+        var pos = 0
+        while true:
+          let idx = lower.find(attr, pos)
+          if idx < 0:
+            break
+          var j = idx + attr.len
+          while j < body.len and body[j] in {' ', '\t', '\r', '\n'}:
+            inc j
+          if j >= body.len or body[j] != '=':
+            pos = idx + attr.len
+            continue
+          inc j
+          while j < body.len and body[j] in {' ', '\t', '\r', '\n'}:
+            inc j
+          if j >= body.len:
+            break
+          var value = ""
+          if body[j] in {'"', '\''}:
+            let quote = body[j]
+            inc j
+            let start = j
+            while j < body.len and body[j] != quote:
+              inc j
+            if j <= body.len:
+              value = body[start ..< min(j, body.len)]
+          else:
+            let start = j
+            while j < body.len and body[j] notin {' ', '\t', '\r', '\n', '>'}:
+              inc j
+            value = body[start ..< min(j, body.len)]
+          let p = sameHostUrlToPath(value, currentPath, effectiveHost)
+          if p.len > 0 and p notin seen:
+            seen.incl p
+            result.add p
+          pos = max(j + 1, idx + attr.len)
+
+    let matchRe = if config.httpMatchRegex.len > 0: re(config.httpMatchRegex) else: nil
+    let filterRe = if config.httpFilterRegex.len > 0: re(config.httpFilterRegex) else: nil
+    let resumeSeen = loadResumeSeen(config.httpResumeFile)
+    var baselinePath: seq[HttpSig]
+    var baselineVhost: seq[HttpSig]
+    let useCalibration = config.httpBaseline or config.httpAutoCalibrate
+    if useCalibration:
+      let calibrationCount = if config.httpAutoCalibrate: 6 else: 2
+      for _ in 0 ..< calibrationCount:
+        let bPath = joinHttpPath("/", "nimux-baseline-" & $rand(2_000_000_000))
+        let br = await httpclient.probeHttpPath(host, config.port,
+          config.timeoutMs, config.useSsl, config.username, config.password,
+          bPath, "", config.httpMethod, config.httpUserAgent,
+          config.httpHeaders, config.httpFollowRedirects)
+        baselinePath.add sigOf(br)
+      if config.httpVhostsWordlist.len > 0:
+        for _ in 0 ..< calibrationCount:
+          let bHost = "nimux-baseline-" & $rand(2_000_000_000) & "." & vhostDomain
+          let br = await httpclient.probeHttpPath(host, config.port,
+            config.timeoutMs, config.useSsl, config.username, config.password,
+            normalizeBasePath(config.winRmPath), bHost, config.httpMethod,
+            config.httpUserAgent, config.httpHeaders, config.httpFollowRedirects)
+          baselineVhost.add sigOf(br)
+
+    var findings = newJArray()
+    var skippedResume = 0
+    var skippedBaseline = 0
+    var skippedFilter = 0
+    var nextIndex = 0
+    var nextRequestAt = epochTime()
+    proc worker(): Future[void] {.async.} =
+      while true:
+        if nextIndex >= checks.len:
+          break
+        let current = nextIndex
+        inc nextIndex
+        let item = checks[current]
+        if checkKey(item.kind, item.path, item.hostHeader) in resumeSeen:
+          inc skippedResume
+          continue
+        if config.httpRatePerSec > 0:
+          let now = epochTime()
+          if now < nextRequestAt:
+            await sleepAsync(int((nextRequestAt - now) * 1000))
+          nextRequestAt = max(epochTime(), nextRequestAt) + (1.0 / float(config.httpRatePerSec))
+        let r = await httpclient.probeHttpPath(host, config.port,
+          config.timeoutMs, config.useSsl, config.username, config.password,
+          item.path, item.hostHeader, config.httpMethod, config.httpUserAgent,
+          config.httpHeaders, config.httpFollowRedirects)
+        var matchReason = "status matched"
+        if not statusAllowed(r.statusCode, config):
+          inc skippedFilter
+          continue
+        if config.httpMatchLength.len > 0 and not lengthMatches(config.httpMatchLength, r.bodyLength):
+          inc skippedFilter
+          continue
+        if lengthMatches(config.httpFilterLength, r.bodyLength):
+          inc skippedFilter
+          continue
+        let text = responseText(item, r)
+        if not matchRe.isNil and not text.contains(matchRe):
+          inc skippedFilter
+          continue
+        if not filterRe.isNil and text.contains(filterRe):
+          inc skippedFilter
+          continue
+        if useCalibration:
+          let bases = if item.kind == "vhost": baselineVhost else: baselinePath
+          if similarToBaseline(sigOf(r), bases):
+            inc skippedBaseline
+            continue
+          matchReason = if config.httpAutoCalibrate: "differs from calibration" else: "differs from baseline"
+        elif config.httpMatchLength.len > 0:
+          matchReason = "length matched"
+        elif not matchRe.isNil:
+          matchReason = "regex matched"
+        let effectiveHost = if item.hostHeader.len > 0: item.hostHeader else: host
+        var extractedLinks = newJArray()
+        if config.httpExtractLinks and r.body.len > 0:
+          for link in extractHtmlLinks(r.body, item.path, effectiveHost):
+            extractedLinks.add %link
+            if config.httpRecursion and item.depth < config.httpDepth:
+              enqueue("link", link, item.hostHeader, item.depth + 1)
+        if config.httpRecursion and item.depth < config.httpDepth and
+            item.kind in ["dir", "link", "page"] and r.statusCode in [200, 301, 302, 307, 308]:
+          var nextPath = item.path
+          if r.location.startsWith("/"):
+            nextPath = r.location
+            enqueue("link", nextPath, item.hostHeader, item.depth + 1)
+          let baseNext = normalizeBasePath(nextPath)
+          for word in loadWords(config.httpDirsWordlist):
+            enqueue("dir", joinHttpPath(baseNext, word), item.hostHeader, item.depth + 1)
+        findings.add %*{
+          "kind": item.kind,
+          "path": item.path,
+          "host_header": item.hostHeader,
+          "depth": item.depth,
+          "status_code": r.statusCode,
+          "reason": r.reason,
+          "length": r.bodyLength,
+          "title": r.title,
+          "server": r.server,
+          "location": r.location,
+          "baseline_filtered": false,
+          "match_reason": matchReason,
+          "extracted_links": extractedLinks
+        }
+
+    var workers: seq[Future[void]] = @[]
+    for _ in 0 ..< min(max(1, config.concurrency), max(1, checks.len)):
+      workers.add worker()
+    for future in workers:
+      await future
+
+    return %*{
+      "protocol": if config.useSsl or config.protocol == "https": "https" else: "http",
+      "operation": "web-enum",
+      "host": host, "port": config.port, "ssl": config.useSsl,
+      "base_path": normalizeBasePath(config.winRmPath),
+      "workers": config.concurrency,
+      "method": config.httpMethod,
+      "follow_redirects": config.httpFollowRedirects,
+      "baseline": config.httpBaseline,
+      "auto_calibrate": config.httpAutoCalibrate,
+      "extract_links": config.httpExtractLinks,
+      "recursion": config.httpRecursion,
+      "depth_limit": config.httpDepth,
+      "rate": config.httpRatePerSec,
+      "checked": checks.len,
+      "skipped_resume": skippedResume,
+      "skipped_baseline": skippedBaseline,
+      "skipped_filter": skippedFilter,
+      "found": findings.len,
+      "discoveries": findings
+    }
+
   let r = await httpclient.probeHttp(host, config.port, config.timeoutMs,
     config.useSsl, config.username, config.password, config.winRmPath)
   return %*{
@@ -10479,9 +11301,76 @@ proc httpProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
     "reachable": r.reachable, "status_code": r.statusCode, "reason": r.reason,
     "server": r.server, "location": r.location, "content_type": r.contentType,
     "www_authenticate": r.wwwAuthenticate, "title": r.title,
-    "body_snippet": r.bodySnippet, "authenticated": r.authenticated,
+    "body_length": r.bodyLength, "body_snippet": r.bodySnippet, "authenticated": r.authenticated,
     "auth_message": r.authMessage, "path": config.winRmPath,
     "username": config.username
+  }
+
+proc dnsSubdomainEnumOne(domain: string; config: CliConfig): JsonNode =
+  proc loadWords(path: string): seq[string] =
+    if path.len == 0:
+      raise newException(ValueError, "dns --subdomains requires a wordlist")
+    if not fileExists(path):
+      raise newException(IOError, "wordlist not found: " & path)
+    var seen = initHashSet[string]()
+    for line in lines(path):
+      let word = line.strip()
+      if word.len == 0 or word.startsWith("#"):
+        continue
+      if word notin seen:
+        seen.incl word
+        result.add word
+
+  type DnsJob = object
+    name: string
+    found: bool
+    addresses: seq[string]
+    message: string
+
+  let baseDomain = domain.strip(chars = {'.', ' ', '\t', '\r', '\n'})
+  let words = loadWords(config.httpSubdomainsWordlist)
+  var jobs: seq[DnsJob]
+  for word in words:
+    let clean = word.strip(chars = {'.', ' ', '\t', '\r', '\n'})
+    if clean.len > 0:
+      jobs.add DnsJob(name: clean & "." & baseDomain)
+
+  proc resolveJob(job: ptr DnsJob) {.thread.} =
+    try:
+      let h = getHostByName(job.name)
+      job.addresses = h.addrList
+      job.found = job.addresses.len > 0
+    except CatchableError as error:
+      job.message = error.msg
+
+  var offset = 0
+  while offset < jobs.len:
+    let last = min(jobs.len, offset + max(1, config.concurrency))
+    var threads = newSeq[Thread[ptr DnsJob]](last - offset)
+    for i in offset ..< last:
+      createThread(threads[i - offset], resolveJob, addr jobs[i])
+    for thread in threads.mitems:
+      joinThread(thread)
+    offset = last
+
+  var found = newJArray()
+  for job in jobs:
+    if job.found:
+      var addrs = newJArray()
+      for addr in job.addresses:
+        addrs.add %addr
+      found.add %*{"name": job.name, "addresses": addrs}
+
+  result = %*{
+    "protocol": "dns",
+    "operation": "subdomains",
+    "host": baseDomain,
+    "port": 53,
+    "domain": baseDomain,
+    "workers": config.concurrency,
+    "checked": jobs.len,
+    "found": found.len,
+    "subdomains": found
   }
 
 proc afpProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
@@ -11356,7 +12245,10 @@ proc smbMkdirProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async
 proc protocolProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
   case config.protocol
   of "smb":
-    result = await smbProbeOne(host, config)
+    if config.smbSpider:
+      result = await smbSpiderProbeOne(host, config)
+    else:
+      result = await smbProbeOne(host, config)
   of "ldap":
     result = await ldapProbeOne(host, config)
   of "winrm":
@@ -11383,6 +12275,8 @@ proc protocolProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async
     result = await webdavProbeOne(host, config)
   of "http", "https":
     result = await httpProbeOne(host, config)
+  of "dns":
+    result = dnsSubdomainEnumOne(host, config)
   of "scm":
     result = await smbExecProbeOne(host, config)
   of "cim":
@@ -11561,6 +12455,57 @@ proc renderProtocolLine(node: JsonNode): string =
       gray("│  ") & text
     proc kv(label: string; value: string): string =
       bodyLine(padR(dim(label), 11) & value)
+    if node{"operation"}.getStr() == "spider":
+      let titleText = bold("SMB SPIDER") & "  " & brightCyan(host & ":" & $port)
+      result = topBorder(titleText)
+      let ok = node{"success"}.getBool()
+      result.add "\n" & kv("status", if ok: green("ok") else: red("fail"))
+      if node{"authenticated"}.getBool():
+        result.add "\n" & kv("session", green("authenticated"))
+      result.add "\n" & kv("shares", $node{"shares_checked"}.getInt())
+      if node{"root"}.getStr().len > 0:
+        result.add "\n" & kv("root", dim(node{"root"}.getStr()))
+      result.add "\n" & kv("depth", $node{"max_depth"}.getInt())
+      result.add "\n" & kv("visited",
+        $node{"dirs_visited"}.getInt() & " dirs   " &
+        $node{"files_seen"}.getInt() & " files")
+      result.add "\n" & kv("matched", bold($node{"matched"}.getInt()))
+      if node.hasKey("patterns") and node["patterns"].kind == JArray and node["patterns"].len > 0:
+        var shown: seq[string]
+        for p in node["patterns"]:
+          shown.add p.getStr()
+          if shown.len >= 6: break
+        let suffix = if node["patterns"].len > shown.len: dim(" ...") else: ""
+        result.add "\n" & kv("patterns", dim(shown.join(", ")) & suffix)
+      if node.hasKey("entries") and node["entries"].kind == JArray and node["entries"].len > 0:
+        result.add "\n" & midBorder("matches " & dim("(" & $node["entries"].len & ")"))
+        const ShareW = 14
+        const SizeW = 10
+        var emitted = 0
+        for entry in node["entries"]:
+          if emitted >= 40:
+            result.add "\n" & bodyLine(dim("  ... " & $(node["entries"].len - emitted) & " more"))
+            break
+          let marker = if entry{"is_directory"}.getBool(): cyan("dir ") else: green("file")
+          let size =
+            if entry{"is_directory"}.getBool(): "-"
+            else: $entry{"size"}.getInt()
+          result.add "\n" & bodyLine("  " &
+            padR(bold(entry{"share"}.getStr()), ShareW) &
+            padR(marker, 6) &
+            padL(size, SizeW) & "  " &
+            entry{"path"}.getStr())
+          inc emitted
+      if node.hasKey("errors") and node["errors"].kind == JArray and node["errors"].len > 0:
+        result.add "\n" & midBorder("errors " & dim("(" & $node["errors"].len & ")"))
+        for err in node["errors"]:
+          result.add "\n" & bodyLine("  " & red(err{"share"}.getStr()) &
+            dim(" " & err{"path"}.getStr() & " " & err{"status"}.getStr() & " " &
+            err{"message"}.getStr()))
+      if node{"message"}.getStr().len > 0:
+        result.add "\n" & kv("message", if ok: dim(node{"message"}.getStr()) else: red(node{"message"}.getStr()))
+      result.add "\n" & bottomBorder()
+      return
     let titleText = bold("SMB") & "  " & brightCyan(host & ":" & $port) &
       "  " & bold(fqdn)
     result = topBorder(titleText)
@@ -13174,7 +14119,49 @@ proc renderProtocolLine(node: JsonNode): string =
     let protoH = if node["protocol"].getStr() == "https": "HTTPS" else: "HTTP"
     let titleH = bold(protoH) & "  " & brightCyan(host & ":" & $port)
     result = topH(titleH)
-    let reachH = node["reachable"].getBool()
+    let reachH = node{"reachable"}.getBool()
+    if node{"operation"}.getStr() == "web-enum":
+      result.add "\n" & kvH(dim("operation"), brightCyan("web-enum"))
+      result.add "\n" & kvH(dim("checked"), $node{"checked"}.getInt())
+      result.add "\n" & kvH(dim("found"), green($node{"found"}.getInt()))
+      var skippedParts: seq[string]
+      if node{"skipped_resume"}.getInt() > 0:
+        skippedParts.add "resume=" & $node{"skipped_resume"}.getInt()
+      if node{"skipped_baseline"}.getInt() > 0:
+        skippedParts.add "baseline=" & $node{"skipped_baseline"}.getInt()
+      if node{"skipped_filter"}.getInt() > 0:
+        skippedParts.add "filter=" & $node{"skipped_filter"}.getInt()
+      if skippedParts.len > 0:
+        result.add "\n" & kvH(dim("skipped"), skippedParts.join("  "))
+      let discoveries = node{"discoveries"}
+      if discoveries != nil and discoveries.len > 0:
+        for item in discoveries:
+          let kind = item{"kind"}.getStr()
+          let status = item{"status_code"}.getInt()
+          let path = item{"path"}.getStr()
+          let hh = item{"host_header"}.getStr()
+          let whereText =
+            if hh.len > 0: hh & path
+            else: path
+          let statusText =
+            (if status >= 200 and status < 300: green($status)
+             elif status >= 300 and status < 400: yellow($status)
+             else: red($status))
+          var detail = statusText & "  " & bold(kind) & "  " & brightCyan(whereText)
+          if item{"depth"}.getInt() > 0:
+            detail.add "  " & dim("d=" & $item{"depth"}.getInt())
+          if item{"length"}.getInt() > 0:
+            detail.add "  " & dim($item{"length"}.getInt() & "b")
+          if item{"title"}.getStr().len > 0:
+            detail.add "  " & dim(item{"title"}.getStr())
+          if item{"match_reason"}.getStr().len > 0:
+            detail.add "  " & dim(item{"match_reason"}.getStr())
+          let links = item{"extracted_links"}
+          if links != nil and links.len > 0:
+            detail.add "  " & dim("links=" & $links.len)
+          result.add "\n" & bodyH(detail)
+      result.add "\n" & botH()
+      return
     result.add "\n" & kvH(dim("status"), if reachH: green("listening") else: red("down"))
     let code = node{"status_code"}.getInt()
     if code > 0:
@@ -13198,6 +14185,37 @@ proc renderProtocolLine(node: JsonNode): string =
     if node{"body_snippet"}.getStr().len > 0:
       result.add "\n" & kvH(dim("body"), dim(node["body_snippet"].getStr()))
     result.add "\n" & botH()
+    return
+  of "dns":
+    const BoxWidthDns = 78
+    proc visLenD(text: string): int =
+      var i = 0
+      while i < text.len:
+        if text[i] == '\e' and i + 1 < text.len and text[i + 1] == '[':
+          while i < text.len and text[i] != 'm': inc i
+          if i < text.len: inc i
+        else: inc result; inc i
+    proc topD(label: string): string =
+      gray("┌─ ") & label & gray(" " & repeat("─", max(3, BoxWidthDns - visLenD("┌─ " & label & " "))))
+    proc botD(): string = gray("└" & repeat("─", BoxWidthDns - 1))
+    proc bodyD(text: string): string = gray("│  ") & text
+    proc kvD(label, value: string): string =
+      bodyD(label & repeat(' ', max(1, 11 - visLenD(label))) & value)
+    result = topD(bold("DNS") & "  " & brightCyan(node{"domain"}.getStr()))
+    result.add "\n" & kvD(dim("operation"), brightCyan(node{"operation"}.getStr()))
+    result.add "\n" & kvD(dim("checked"), $node{"checked"}.getInt())
+    result.add "\n" & kvD(dim("found"), green($node{"found"}.getInt()))
+    let subs = node{"subdomains"}
+    if subs != nil and subs.len > 0:
+      for item in subs:
+        var addrs: seq[string]
+        let arr = item{"addresses"}
+        if arr != nil:
+          for addr in arr:
+            addrs.add addr.getStr()
+        result.add "\n" & bodyD(brightCyan(item{"name"}.getStr()) &
+          (if addrs.len > 0: "  " & dim(addrs.join(", ")) else: ""))
+    result.add "\n" & botD()
     return
   of "scm":
     const BoxWidth = 78
@@ -16110,7 +17128,9 @@ proc runProtocol(config: CliConfig) =
         result.add item
 
   let results =
-    if workList.len > 1:
+    if workList.len > 1 and config.httpDirsWordlist.len == 0 and
+        config.httpFilesWordlist.len == 0 and config.httpVhostsWordlist.len == 0 and
+        config.httpSubdomainsWordlist.len == 0:
       runThreaded()
     else:
       waitFor runAll()
@@ -17366,7 +18386,7 @@ proc main() =
     case config.protocol
     of "smb", "ldap", "winrm", "mssql", "rdp", "scm", "cim", "bin",
        "tsch", "mmc", "put", "get", "ls", "rm", "mkdir", "dcsync", "secrets",
-       "ssh", "vnc", "ftp", "mysql", "postgres", "afp", "nfs", "webdav", "http", "https",
+       "ssh", "vnc", "ftp", "mysql", "postgres", "afp", "nfs", "webdav", "http", "https", "dns",
        "kerberos":
       runProtocol(config)
     of "scan":
