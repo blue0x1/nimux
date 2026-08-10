@@ -33,7 +33,7 @@ import protocols/postgres/client as pgclient
 import protocols/http/client as httpclient
 import protocols/nfs/client as nfsclient
 
-const Version = "1.0.4"
+const Version = "1.0.5"
 const Author = "Chokri Hammedi (blue0x1)"
 const FileAttributeReparsePoint = 0x00000400'u32
 
@@ -1762,6 +1762,7 @@ GENERAL
                        Append JSONL rollback records for supported AD writes
   --dry-run            LDAP generic writes/LDIF: show planned operations only
   --no-color           Disable ANSI colors (also honors NO_COLOR env var)
+  --version            Print nimux version and exit
   -h, --help           Show this help
 
 AUTHENTICATION (smb, ldap, winrm, mssql, service, svc, wmi, com)
@@ -2249,7 +2250,7 @@ proc parseCli(): CliConfig =
     longNoVal = @["json", "ssl", "kerberos", "local-auth", "shares", "users",
       "groups", "pass-pol", "loggedon-users", "sessions", "disks", "rid-brute", "local-admins",
       "computers", "asreproast", "kerberoast", "trusts", "gpos", "dcs",
-      "admins", "dns", "open", "help", "debug-probe", "udp", "no-color", "F",
+      "admins", "dns", "open", "help", "version", "debug-probe", "udp", "no-color", "F",
       "Pn", "oG", "oC", "oX", "shell", "cli", "ldaps", "gc", "anonymous", "modify",
       "make-dadmin", "make-kerberoast", "make-asreproast", "set-rbcd",
       "shadow-creds", "get-laps", "enable", "disable", "set-password", "set-owner", "set",
@@ -2275,6 +2276,9 @@ proc parseCli(): CliConfig =
         result.targets.add key
     of cmdLongOption, cmdShortOption:
       case key
+      of "version":
+        echo "nimux " & Version
+        quit 0
       of "h", "help":
         usage(result.protocol)
         quit 0

@@ -49,7 +49,7 @@ AI clients should default to read-only actions and require explicit approval for
 
 ## Current Version Coverage
 
-Agent and MCP integration material should cover the 1.0.3 and 1.0.4 command surface:
+Agent and MCP integration material should cover the 1.0.3 through 1.0.5 command surface:
 
 - BloodHound Legacy 4.x collection with `--bloodhound --legacy --bloodhound-out <zip>`, including ACL and object-control data.
 - ADCS inventory, certificate inventory, native `ICertAdminD2` policy get/set, `EditFlags`, `DisableExtensionList`, empty-value clearing, RPC certificate requests, PFX output, and PKINIT ccache generation.
@@ -57,5 +57,6 @@ Agent and MCP integration material should cover the 1.0.3 and 1.0.4 command surf
 - LDAP capture server mode with `nimux ldap --server`, `--srvhost`, `--srvport`, and optional `--challenge`.
 - Lightweight web discovery with `nimux http --dirs`, `--files`, `--vhosts`, `--workers`, status filters, soft-404 baselines, `--auto-calibrate`, `--recursion --depth`, `--extract-links`, regex filters, length/size filters (`--filter-length` / `-fs`), custom method/header support, rate limits, resume files, and `nimux dns --subdomains`.
 - Read-only SMB share spidering with `nimux smb --spider`, optional `--share`, `--remote`, `--max-depth`, `--spider-pattern`, `--size-limit`, and `--interesting` filename patterns.
+- Global `nimux --version` and anonymous/null-session `nimux smb --shares` enumeration when the target permits it.
 
 These workflows remain operator-driven. AI clients should parse JSON when possible, redact sensitive values, and request explicit approval before writes, certificate material creation, capture listeners, service restarts, or remote execution. HTTP directory/file/vhost discovery and DNS subdomain enumeration are read-only, but clients should still respect scope, rate limits, and target authorization.

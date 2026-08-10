@@ -241,7 +241,7 @@ MCP request
   -> return structured result
 ```
 
-## 1.0.4 Command Surface Notes
+## 1.0.5 Command Surface Notes
 
 The MCP wrapper should recognize the current nimux CLI even when not every flow has a first-class typed tool yet. Use controlled subprocess calls with `--json` and policy approval for:
 
@@ -256,6 +256,8 @@ The MCP wrapper should recognize the current nimux CLI even when not every flow 
 - `nimux http <host> --files <wordlist> --extensions <csv> --filter-regex <re> -fs <size> --json` as read-only file discovery.
 - `nimux http <ip> --vhosts <wordlist> -d <domain> --workers <n> --resume <jsonl> --json` as read-only virtual-host discovery.
 - `nimux dns <domain> --subdomains <wordlist> --workers <n> --json` as read-only subdomain discovery.
+- `nimux smb <host> --shares --json` as authenticated or anonymous/null-session share enumeration when the target permits it.
+- `nimux smb <host> --spider --share <name> --max-depth <n> --interesting --json` as read-only SMB share spidering.
 
 LDAP capture and ADCS request outputs can contain credential-equivalent material. Redact captures, PFX/private key paths when appropriate, and never store raw secrets in MCP logs.
 
