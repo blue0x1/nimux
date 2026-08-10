@@ -237,6 +237,19 @@ MCP request
   -> return structured result
 ```
 
+## 1.0.4 Command Surface Notes
+
+The MCP wrapper should recognize the current nimux CLI even when not every flow has a first-class typed tool yet. Use controlled subprocess calls with `--json` and policy approval for:
+
+- `nimux ldap --bloodhound --legacy --bloodhound-out <zip>` for BloodHound Legacy 4.x output.
+- `nimux ldap --adcs-policy --ca <ca> --adcs-get-editflags` and `--adcs-get-disable-extension-list` as read operations.
+- `nimux ldap --adcs-policy --ca <ca> --adcs-set-editflags <value>` and `--adcs-set-disable-extension-list <value>` as write operations.
+- `nimux ldap --adcs-request --adcs-rpc ... --out <file.pfx>` as certificate material creation.
+- `nimux ldap --adcs-auth --pfx <file.pfx> --ccache <file> --krb5-config <file>` as PKINIT ccache generation.
+- `nimux ldap --server --srvhost <ip> --srvport <port> [--challenge <hex>]` as a long-running capture listener.
+
+LDAP capture and ADCS request outputs can contain credential-equivalent material. Redact captures, PFX/private key paths when appropriate, and never store raw secrets in MCP logs.
+
 ## Roadmap
 
 - Add streaming command output for long-running operations.

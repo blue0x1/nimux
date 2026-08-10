@@ -4,6 +4,16 @@ This file summarizes the full `nimux` command surface for AI agents and MCP wrap
 
 Use `nimux <command> --help` as the final source of truth for the installed binary.
 
+
+## Version Awareness
+
+Agents should treat local `nimux --help` as authoritative, but the 1.0.3 and 1.0.4 releases added behavior that older prompts may miss:
+
+- 1.0.3 stabilized BloodHound Legacy output and ADCS RPC workflows: `--bloodhound --legacy`, ACL/object-control export, native `ICertAdminD2` policy get/set, RPC certificate requests, PKCS#12 output, PKINIT ccache generation, and Kerberos execution with explicit `--krb5-config`.
+- 1.0.4 added LDAP capture server support and polished ADCS policy output: `nimux ldap --server`, `--srvhost`, `--srvport`, random or fixed `--challenge`, repeated LDAP captures, readable `DisableExtensionList` get output, and empty-value clearing for `--adcs-set-disable-extension-list`.
+
+Do not assume these flags exist on older binaries. Check the local version and help output before building a workflow.
+
 ## Global Targets
 
 Commands accept one or more targets:
@@ -232,9 +242,43 @@ AD CS:
 ```bash
 nimux ldap <dc> -u <user> -p '<password>' -d <domain> --adcs
 nimux ldap <dc> -u <user> -p '<password>' -d <domain> --cert-inventory
+nimux ldap <dc> -u <ca-manager> -H <nt_hash> -d <domain> --adcs-policy --ca '<ca-name>' --adcs-get-editflags --json
+nimux ldap <dc> -u <ca-manager> -H <nt_hash> -d <domain> --adcs-policy --ca '<ca-name>' --adcs-get-disable-extension-list --json
+nimux ldap <dc> -u <ca-manager> -H <nt_hash> -d <domain> --adcs-policy --ca '<ca-name>' --adcs-set-editflags <decimal-or-hex>
+nimux ldap <dc> -u <ca-manager> -H <nt_hash> -d <domain> --adcs-policy --ca '<ca-name>' --adcs-set-disable-extension-list 1.3.6.1.4.1.311.25.2
+nimux ldap <dc> -u <ca-manager> -H <nt_hash> -d <domain> --adcs-policy --ca '<ca-name>' --adcs-set-disable-extension-list ''
+nimux ldap <dc> -u <user> -p '<password>' -d <domain> --adcs-request --adcs-rpc --ca '<ca-name>' --template <template> --upn <user@domain> --sid <objectSid> --out cert-out.pfx
 nimux ldap <dc> -u <user> -p '<password>' -d <domain> --adcs-request --ca '<ca-name>' --template <template> --out cert-out
-nimux ldap <dc> -u <user> -p '<password>' -d <domain> --adcs-auth --upn <user@domain> --pfx cert-out.pfx --ccache user.ccache
+nimux ldap <dc> -u <user> -p '<password>' -d <domain> --adcs-auth --upn <user@domain> --pfx cert-out.pfx --ccache user.ccache --krb5-config <domain>.krb5.conf
 ```
+
+AD CS notes for agents:
+
+- `--adcs-policy` uses CA administration rights over `ICertAdminD2`; it is not a generic LDAP write. Treat it as a CA configuration change requiring explicit approval and verification.
+- `--adcs-get-disable-extension-list` should be shown to the user in normal text output as well as JSON.
+- An empty string passed to `--adcs-set-disable-extension-list ''` clears the policy value. Do not insert a positional `set` argument.
+- Restarting Certificate Services can be required before CA policy changes affect new requests; that is remote command execution and requires approval.
+- `--adcs-request --adcs-rpc` creates certificate/key material. Record the emitted `.cer`, `.pfx`, and any CA PEM paths, but redact private key material.
+- If PKINIT fails, inspect certificate identity details first: SAN UPN, SAN URL SID, and security extension SID can decide which principal Windows maps.
+- Generate `krb5.conf` and pass `--krb5-config` for PKINIT and Kerberos SMB/WinRM/SCM paths when DNS or realm resolution is uncertain.
+
+LDAP capture server:
+
+```bash
+nimux ldap --server
+nimux ldap --server --srvhost 0.0.0.0 --srvport 2222
+nimux ldap --server --srvhost <listen-ip> --srvport <port> --challenge <16-hex-chars>
+nimux ldap --server --srvhost 0.0.0.0 --srvport 2222 --json
+```
+
+LDAP capture notes for agents:
+
+- Default listen port is 389, not 2222. Use `--srvport` when a non-standard port is needed.
+- If `--challenge` is omitted, nimux generates a random 8-byte NTLM challenge and prints it.
+- The listener stays running and can capture repeated connections until interrupted.
+- Normal output uses nimux-style panels for listener state, connections, simple binds, and NetNTLM captures; JSON mode emits one event per line.
+- Captured passwords, NetNTLM hashes, and challenge/response material are secrets. Redact them unless the user explicitly asks to display them.
+
 
 GPO:
 
@@ -467,7 +511,7 @@ Read-only by default:
 ```text
 scan
 smb without coercion, ticket capture, or hash changes
-ldap queries and BloodHound output
+ldap queries, BloodHound output, and ADCS policy get operations
 kerberos describe/list/conversion
 krb5conf
 http
@@ -507,6 +551,7 @@ ldap RBCD writes
 ldap shadow credentials
 ldap certificate mapping
 ldap AD CS requests when they create new certificate material
+ldap AD CS policy changes (`--adcs-policy`, EditFlags, DisableExtensionList)
 GPO create, link, unlink, set, put, delete, startup, schtask
 SMB set-hash
 put
@@ -524,6 +569,7 @@ dcsync
 dcsync --trust-keys
 Kerberos ticket forging
 ticket capture
+LDAP capture server output containing passwords or NetNTLM hashes
 DPAPI material collection
 ```
 
@@ -532,6 +578,7 @@ Requires explicit approval for deployment or routing:
 ```text
 socks deploy
 socks cleanup
+LDAP capture listener on an exposed interface
 using a pivot to access a new internal network segment
 proxy_command through a stored pivot
 ```

