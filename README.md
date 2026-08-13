@@ -35,7 +35,6 @@ https://docs.nimux.wiki
 
 `v1.0.5` adds the lightweight discovery layer around the existing AD/remote-ops command surface:
 
-- Global `nimux --version`
 - HTTP directory, file, and vhost discovery with workers, recursion, link extraction, resume, and false-positive filters such as `-fs`
 - DNS subdomain discovery with worker support
 - Read-only SMB share spidering with depth, size, pattern, and interesting-file filters
