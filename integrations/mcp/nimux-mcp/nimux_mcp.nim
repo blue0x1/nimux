@@ -389,6 +389,11 @@ proc addAuth(argv: var seq[string]; args: JsonNode) =
   if krb5.len > 0: argv.add(@["--krb5-config", krb5])
   if getBool(args, "local_auth"): argv.add("--local-auth")
 
+proc addSshKey(argv: var seq[string]; args: JsonNode) =
+  let sshKey = getStr(args, "ssh_key", getStr(args, "private_key"))
+  if sshKey.len > 0:
+    argv.add(@["--ssh-key", sshKey])
+
 proc addCommon(argv: var seq[string]; args: JsonNode) =
   let proxy = getStr(args, "proxy")
   let port = getInt(args, "port")
@@ -410,6 +415,31 @@ proc loadState(): JsonNode =
 
 proc saveState(state: JsonNode) =
   writeFile(statePath(), pretty(state))
+
+proc rememberPivotMetadata(state: var JsonNode; pivotId, target, listener: string;
+                           sp, cp: int; linuxBackend: bool; wrapped: JsonNode) =
+  var pivot = %*{
+    "pivot_id": pivotId,
+    "target": target,
+    "local_proxy_url": "socks5://127.0.0.1:" & $sp,
+    "listener": listener,
+    "socks_port": sp,
+    "control_port": cp,
+    "platform": (if linuxBackend: "linux" else: "windows"),
+    "created_at": $now(),
+    "raw": wrapped
+  }
+  if wrapped.kind == JObject and wrapped.hasKey("json") and wrapped["json"].kind == JObject:
+    let meta = wrapped["json"]
+    if meta.hasKey("pid") and meta["pid"].kind == JString and meta["pid"].getStr.len > 0:
+      pivot["pid"] = meta["pid"]
+    if meta.hasKey("task_name") and meta["task_name"].kind == JString and meta["task_name"].getStr.len > 0:
+      pivot["socks_task"] = meta["task_name"]
+      pivot["task_name"] = meta["task_name"]
+    if meta.hasKey("remote_path") and meta["remote_path"].kind == JString and meta["remote_path"].getStr.len > 0:
+      pivot["remote_helper_path"] = meta["remote_path"]
+      pivot["remote_path"] = meta["remote_path"]
+  state["pivots"][pivotId] = pivot
 
 proc toolDefs(): seq[ToolDef] =
   let authProps = @[
@@ -459,13 +489,16 @@ proc toolDefs(): seq[ToolDef] =
     ToolDef(name: "nimux.socks_deploy", risk: riskDeploy, description: "Deploy native nimux SOCKS pivot helper.",
       schema: schema(@["target", "listener", "approval_id"], authProps & @[
         ("target", prop("string")), ("listener", prop("string")), ("approval_id", prop("string")),
-        ("socks_port", prop("integer")), ("control_port", prop("integer")), ("reverse", prop("boolean"))
+        ("socks_port", prop("integer")), ("control_port", prop("integer")), ("reverse", prop("boolean")),
+        ("linux", prop("boolean")), ("ssh_key", prop("string")), ("port", prop("integer")),
+        ("timeout_ms", prop("integer"))
       ])),
     ToolDef(name: "nimux.socks_status", risk: riskRead, description: "Return stored pivot metadata.",
       schema: schema(@["pivot_id"], {"pivot_id": prop("string")})),
     ToolDef(name: "nimux.socks_cleanup", risk: riskCleanup, description: "Cleanup native nimux SOCKS pivot helper.",
       schema: schema(@["pivot_id", "approval_id"], authProps & @[
-        ("pivot_id", prop("string")), ("approval_id", prop("string"))
+        ("pivot_id", prop("string")), ("approval_id", prop("string")),
+        ("ssh_key", prop("string")), ("port", prop("integer")), ("timeout_ms", prop("integer"))
       ])),
     ToolDef(name: "nimux.proxy_scan", risk: riskRead, description: "Run scan through a stored pivot.",
       schema: schema(@["pivot_id", "target"], {
@@ -672,6 +705,11 @@ proc toolCall(name: string; args: JsonNode; policy: Policy): JsonNode =
     requireTarget(policy, target)
     argv = @["socks", target]
     addAuth(argv, args)
+    let linuxBackend = getBool(args, "linux")
+    if linuxBackend:
+      argv.add("--linux")
+      addSshKey(argv, args)
+    addCommon(argv, args)
     if getBool(args, "reverse", true): argv.add("--reverse")
     argv.add(@["--listener", getStr(args, "listener")])
     let sp = getInt(args, "socks_port", 1080)
@@ -679,20 +717,10 @@ proc toolCall(name: string; args: JsonNode; policy: Policy): JsonNode =
     argv.add(@["--socks-port", $sp, "--control-port", $cp])
     let wrapped = runWrapped(argv, args, policy)
     let pivotId = "pivot-" & $epochTime().int
-    let proxy = "socks5://127.0.0.1:" & $sp
     var state = loadState()
-    state["pivots"][pivotId] = %*{
-      "pivot_id": pivotId,
-      "target": target,
-      "local_proxy_url": proxy,
-      "listener": getStr(args, "listener"),
-      "socks_port": sp,
-      "control_port": cp,
-      "created_at": $now(),
-      "raw": wrapped
-    }
+    rememberPivotMetadata(state, pivotId, target, getStr(args, "listener"), sp, cp, linuxBackend, wrapped)
     saveState(state)
-    %*{"pivot_id": pivotId, "local_proxy_url": proxy, "result": wrapped}
+    %*{"pivot_id": pivotId, "local_proxy_url": "socks5://127.0.0.1:" & $sp, "result": wrapped}
   of "nimux.socks_status":
     let state = loadState()
     let pivotId = getStr(args, "pivot_id")
@@ -708,6 +736,10 @@ proc toolCall(name: string; args: JsonNode; policy: Policy): JsonNode =
     let target = p.getStr("target")
     argv = @["socks", target]
     addAuth(argv, args)
+    if p.hasKey("platform") and p["platform"].kind == JString and p["platform"].getStr == "linux":
+      argv.add("--linux")
+      addSshKey(argv, args)
+    addCommon(argv, args)
     if p.hasKey("pid"): argv.add(@["--kill", "--pid", p["pid"].getStr])
     if p.hasKey("socks_task"): argv.add(@["--socks-task", p["socks_task"].getStr])
     if p.hasKey("remote_helper_path"): argv.add(@["--remote", p["remote_helper_path"].getStr])

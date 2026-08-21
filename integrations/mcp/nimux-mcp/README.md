@@ -173,6 +173,12 @@ Deploy:
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"nimux.socks_deploy","arguments":{"target":"host01.corp.local","username":"administrator","password":"<password>","domain":"corp.local","listener":"10.10.14.10","socks_port":1080,"control_port":1081,"approval_id":"approved-001"}}}
 ```
 
+Linux deploy:
+
+```json
+{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"nimux.socks_deploy","arguments":{"target":"pivot01","username":"ubuntu","ssh_key":"~/.ssh/id_rsa","linux":true,"listener":"10.10.14.10","socks_port":1080,"control_port":1081,"approval_id":"approved-001"}}}
+```
+
 Reuse:
 
 ```json
@@ -183,6 +189,21 @@ Cleanup:
 
 ```json
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nimux.socks_cleanup","arguments":{"pivot_id":"pivot-123","username":"administrator","password":"<password>","domain":"corp.local","approval_id":"approved-002"}}}
+```
+
+Linux cleanup:
+
+```json
+{"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"nimux.socks_cleanup","arguments":{"pivot_id":"pivot-123","username":"ubuntu","ssh_key":"~/.ssh/id_rsa","approval_id":"approved-002"}}}
+```
+
+Linux pivot support:
+
+```text
+set linux=true for SSH-backed pivots
+authenticate with password or ssh_key
+override SSH port with port when needed
+cleanup Linux pivots with pid and remote_helper_path
 ```
 
 ## Response Shape

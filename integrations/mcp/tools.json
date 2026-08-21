@@ -56,7 +56,7 @@
       "risk": "deploy",
       "description": "Deploy the native nimux SOCKS helper as a background pivot after explicit approval.",
       "required": ["target", "listener", "approval_id"],
-      "options": ["auth_ref", "domain", "socks_port", "control_port", "kerberos", "proxy", "reverse"],
+      "options": ["auth_ref", "domain", "socks_port", "control_port", "kerberos", "proxy", "reverse", "linux", "ssh_key", "port", "timeout_ms"],
       "returns": ["pivot_id", "local_proxy_url", "pid", "socks_task", "remote_helper_path"]
     },
     {
@@ -72,7 +72,7 @@
       "risk": "cleanup",
       "description": "Cleanup a previously deployed nimux SOCKS pivot helper.",
       "required": ["pivot_id", "approval_id"],
-      "options": ["auth_ref", "domain"],
+      "options": ["auth_ref", "domain", "ssh_key", "port", "timeout_ms"],
       "returns": ["pivot_id", "cleaned", "message"]
     },
     {

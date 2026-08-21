@@ -131,6 +131,12 @@ Deployment command shape:
 ```bash
 nimux socks <pivot-host> -u <admin> -p '<password>' -d <domain> \
   --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
+
+nimux socks <pivot-host> --linux -u <user> -p '<password>' \
+  --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
+
+nimux socks <pivot-host> --linux -u <user> --ssh-key ~/.ssh/id_rsa \
+  --reverse --listener <operator-ip> --socks-port 1080 --control-port 1081
 ```
 
 Routed command shape:
@@ -154,9 +160,20 @@ socks_task
 remote_helper_path
 created_at
 scope_id
+platform
 ```
 
 Any MCP tool that accepts `proxy` should also accept `pivot_id`. When `pivot_id` is supplied, the server resolves it to the stored `local_proxy_url` and passes it to `nimux` as `--proxy`.
+
+Linux pivot support in the MCP layer:
+
+```text
+set linux=true to route deployment through SSH instead of WinRM
+use password or ssh_key authentication
+Linux deploy and cleanup also accept port and timeout_ms
+Linux cleanup uses pid and remote_helper_path
+Windows cleanup can also use socks_task
+```
 
 ## Safety Model
 
