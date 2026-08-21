@@ -15,8 +15,8 @@ type
     wwwAuthenticate*: string
     title*: string
     headers*: string
-    bodyLength*: int
     body*: string
+    bodyLength*: int
     bodySnippet*: string
     authenticated*: bool
     authMessage*: string
@@ -80,10 +80,10 @@ proc htmlTitle(body: string): string =
   result = body[gt + 1 ..< stop].strip().replace("\r", " ").replace("\n", " ")
 
 proc probeHttpPath*(host: string; port, timeoutMs: int; ssl: bool;
-                    username, password, path, hostHeader: string;
-                    httpMethod = "GET"; userAgent = "nimux/0.1";
-                    extraHeaders: seq[string] = @[];
-                    followRedirects = true): Future[HttpResult] {.async.} =
+                    username, password, path: string;
+                    hostHeader, httpMethod, userAgent: string;
+                    extraHeaders: seq[string];
+                    followRedirects: bool): Future[HttpResult] {.async.} =
   result.host = host
   result.port = port
   result.ssl = ssl
@@ -100,18 +100,21 @@ proc probeHttpPath*(host: string; port, timeoutMs: int; ssl: bool;
       if ssl:
         let ctx = newContext(verifyMode = CVerifyNone)
         ctx.wrapSocket(sock)
-      let hostName = if hostHeader.len > 0: hostHeader else: host
-      let hostHdr = if (ssl and port == 443) or (not ssl and port == 80): hostName else: hostName & ":" & $port
+      let hostHdr =
+        if hostHeader.len > 0: hostHeader
+        elif (ssl and port == 443) or (not ssl and port == 80): host
+        else: host & ":" & $port
       let authHdr =
         if username.len > 0: "Authorization: Basic " & base64.encode(username & ":" & password) & "\r\n"
         else: ""
-      var req = httpMethod.toUpperAscii() & " " & currentPath & " HTTP/1.1\r\nHost: " & hostHdr &
-        "\r\nUser-Agent: " & userAgent & "\r\nAccept: */*\r\n" & authHdr
-      for header in extraHeaders:
-        let clean = header.strip()
+      var extra = ""
+      for item in extraHeaders:
+        let clean = item.strip()
         if clean.len > 0:
-          req.add clean & "\r\n"
-      req.add "Connection: close\r\n\r\n"
+          extra.add clean & "\r\n"
+      let req = httpMethod.toUpperAscii() & " " & currentPath & " HTTP/1.1\r\nHost: " & hostHdr &
+        "\r\nUser-Agent: " & userAgent & "\r\nAccept: */*\r\n" & authHdr & extra &
+        "Connection: close\r\n\r\n"
       await sock.send(req)
       let (status, reason, hdrs, body) = await recvHttpResponse(sock, timeoutMs)
       result.statusCode = status
@@ -122,8 +125,8 @@ proc probeHttpPath*(host: string; port, timeoutMs: int; ssl: bool;
       result.wwwAuthenticate = headerVal(hdrs, "WWW-Authenticate")
       result.title = htmlTitle(body)
       result.headers = hdrs
-      result.bodyLength = body.len
       result.body = body
+      result.bodyLength = body.len
       result.bodySnippet = body.replace("\r", " ").replace("\n", " ")
       if result.bodySnippet.len > 160:
         result.bodySnippet.setLen(160)
@@ -144,5 +147,5 @@ proc probeHttpPath*(host: string; port, timeoutMs: int; ssl: bool;
 
 proc probeHttp*(host: string; port, timeoutMs: int; ssl: bool;
                 username, password, path: string): Future[HttpResult] {.async.} =
-  result = await probeHttpPath(host, port, timeoutMs, ssl, username, password,
-    path, "")
+  return await probeHttpPath(host, port, timeoutMs, ssl, username, password, path,
+    "", "GET", "nimux/0.1", @[], true)

