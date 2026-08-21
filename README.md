@@ -13,7 +13,7 @@
 
 nimux is a native command surface for authorized security assessments. It combines network enumeration, lightweight web discovery, credential validation, Active Directory operations, Kerberos workflows, remote execution, file movement, secrets collection, DCSync, GPO operations, database clients, and SOCKS routing into one Pure-Nim toolkit.
 
-Current release: `v1.0.5`
+Current release: `v1.0.6`
 
 You are on the official public repository for nimux.
 
