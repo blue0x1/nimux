@@ -201,9 +201,9 @@ The MCP server should reject write operations unless:
 {
   "scope": {
     "name": "corp-lab",
-    "domains": ["corp.local"],
+    "domains": ["example.local"],
     "cidrs": ["10.10.10.0/24"],
-    "hosts": ["dc01.corp.local"]
+    "hosts": ["dc01.example.local"]
   },
   "defaults": {
     "redact": true,

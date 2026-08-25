@@ -15,6 +15,9 @@ const
   ]
   OpGetConfigEntry* = 44'u16
   OpSetConfigEntry* = 45'u16
+  OpResubmitRequest* = 5'u16
+  OpGetCASecurity* = 36'u16
+  OpSetCASecurity* = 37'u16
   ICertAdminD2Major* = 0'u16
   ICertAdminD2Minor* = 0'u16
   VtI4 = 3'u16
@@ -41,6 +44,9 @@ type
     entry*: string
     hresult*: uint32
     faultStatus*: uint32
+    requestId*: uint32
+    disposition*: uint32
+    securityDescriptor*: string
     message*: string
     valueI4*: int32
     valueKind*: string
@@ -184,6 +190,50 @@ proc buildGetConfigEntryStub(authority, nodePath, entry: string): string =
   result.addUniqueWString(nodePath, 0x00020004'u32)
   result.addRefWString(entry, 0x00020008'u32)
 
+proc buildResubmitRequestStub(authority: string; requestId: uint32): string =
+  result.addOrpcThis()
+  result.addUniqueWString(authority, 0x00020000'u32)
+  result.addU32Le requestId
+
+proc buildGetCASecurityStub(authority: string): string =
+  result.addOrpcThis()
+  result.addUniqueWString(authority, 0x00020000'u32)
+
+proc addCertTransBlob(d: var string; data: string; referent: uint32) =
+  d.addU32Le uint32(data.len)
+  if data.len == 0:
+    d.addU32Le 0'u32
+    return
+  d.addU32Le referent
+  d.addU32Le uint32(data.len)
+  d.add data
+  pad4(d)
+
+proc buildSetCASecurityStub(authority, sd: string): string =
+  result.addOrpcThis()
+  result.addUniqueWString(authority, 0x00020000'u32)
+  result.addCertTransBlob(sd, 0x00020004'u32)
+
+proc parseCertTransBlob(stub: string; offset: var int): string =
+  if offset + 8 > stub.len:
+    return ""
+  let cb = int(readU32Le(stub, offset))
+  let blobPtr = readU32Le(stub, offset + 4)
+  offset += 8
+  if cb <= 0 or blobPtr == 0'u32:
+    return ""
+  if offset + 4 > stub.len:
+    return ""
+  let maxCount = int(readU32Le(stub, offset))
+  offset += 4
+  let take = min(cb, maxCount)
+  if take < 0 or offset + take > stub.len:
+    return ""
+  result = stub[offset ..< offset + take]
+  offset += take
+  while offset mod 4 != 0 and offset < stub.len:
+    inc offset
+
 proc parseReturnedVariantI4(stub: string; value: var int32; vtName: var string): bool =
   var start = 0
   dcom.parseOrpcThat(stub, start)
@@ -229,6 +279,224 @@ proc parseDcomTrailingHresult(stub: string): uint32 =
       return v
     dec i, 4
   return last
+
+proc parseResubmitResponse(stub: string): tuple[disposition, hresult: uint32] =
+  var offset = 0
+  dcom.parseOrpcThat(stub, offset)
+  if offset + 8 <= stub.len:
+    result.disposition = readU32Le(stub, offset)
+    result.hresult = readU32Le(stub, offset + 4)
+  elif stub.len >= 8:
+    result.disposition = readU32Le(stub, stub.len - 8)
+    result.hresult = readU32Le(stub, stub.len - 4)
+  else:
+    result.hresult = 0xffffffff'u32
+
+proc resubmitRequest*(host: string; timeoutMs: int; credential: smb.SmbCredential;
+                      authMethod: smb.SmbAuthMethod; authority: string;
+                      requestId: uint32): Future[CertAdminResult] {.async.} =
+  result.host = host
+  result.authority = authority
+  result.requestId = requestId
+  result.transport = "certadmin-dcom-tcp"
+
+  var scm: rpc.DceRpcClient
+  try:
+    scm =
+      if authMethod == smb.samKerberos:
+        await rpc.connectAndBindKerb(host, 135, max(timeoutMs, 8000),
+          @(dcom.IRemoteSCMActivatorUuidBytes), dcom.IRemoteSCMActivatorMajor,
+          dcom.IRemoteSCMActivatorMinor, credential.domain)
+      else:
+        await rpc.connectAndBind(host, 135, max(timeoutMs, 8000),
+          @(dcom.IRemoteSCMActivatorUuidBytes), dcom.IRemoteSCMActivatorMajor,
+          dcom.IRemoteSCMActivatorMinor, credential)
+    let createStub = dcom.buildRemoteCreateInstanceStub(
+      bytesToStrLocal(CLSIDCertAdminBytes),
+      bytesToStrLocal(ICertAdminD2UuidBytes))
+    let createResp = await scm.call(4'u16, createStub)
+    scm.close()
+    if not createResp.ok:
+      result.faultStatus = createResp.faultStatus
+      result.message = "RemoteCreateInstance fault 0x" & createResp.faultStatus.toHex(8)
+      return
+    let reply = dcom.parseActivationReply(createResp.stub)
+    if reply.iwbemObjRef.std.ipid.len != 16:
+      result.hresult = reply.comError
+      result.message =
+        if reply.comError != 0'u32:
+          "RemoteCreateInstance returned HRESULT 0x" & reply.comError.toHex(8)
+        else:
+          "RemoteCreateInstance returned no ICertAdminD2 OBJREF"
+      return
+
+    var dynamicPort = dcom.tcpPortFromBindings(reply.bindings)
+    if dynamicPort == 0:
+      dynamicPort = dcom.tcpPortFromBindings(reply.iwbemObjRef.bindings)
+    if dynamicPort == 0 and reply.oxid.len == 8 and authMethod != smb.samKerberos:
+      let resolved = await dcom.resolveOxid2(host, 135, max(timeoutMs, 8000),
+        reply.oxid, credential)
+      dynamicPort = dcom.tcpPortFromBindings(resolved.bindings)
+    if dynamicPort == 0:
+      result.message = "could not determine dynamic DCOM port for CertAdmin"
+      return
+
+    let cli =
+      if authMethod == smb.samKerberos:
+        await rpc.connectAndBindKerb(host, dynamicPort, max(timeoutMs, 8000),
+          @(ICertAdminD2UuidBytes), ICertAdminD2Major, ICertAdminD2Minor, credential.domain,
+          rpc.AuthLevelPktPrivacy)
+      else:
+        await rpc.connectAndBind(host, dynamicPort, max(timeoutMs, 8000),
+          @(ICertAdminD2UuidBytes), ICertAdminD2Major, ICertAdminD2Minor, credential,
+          rpc.AuthLevelPktPrivacy)
+    let callRes = await cli.call(OpResubmitRequest,
+      buildResubmitRequestStub(authority, requestId),
+      reply.iwbemObjRef.std.ipid)
+    cli.close()
+    if not callRes.ok:
+      result.faultStatus = callRes.faultStatus
+      result.message = "ICertAdminD ResubmitRequest faulted"
+      return
+    let parsed = parseResubmitResponse(callRes.stub)
+    result.disposition = parsed.disposition
+    result.hresult = parsed.hresult
+    result.success = result.hresult == 0'u32 and result.disposition == 3'u32
+    result.message =
+      if result.success: "ICertAdminD ResubmitRequest issued the request"
+      elif result.hresult != 0'u32: "ICertAdminD ResubmitRequest returned HRESULT 0x" & result.hresult.toHex(8)
+      else: "ICertAdminD ResubmitRequest disposition 0x" & result.disposition.toHex(8)
+  except CatchableError as error:
+    if scm != nil:
+      scm.close()
+    result.message = error.msg
+    return
+
+proc openCertAdminObject(host: string; timeoutMs: int; credential: smb.SmbCredential;
+                         authMethod: smb.SmbAuthMethod):
+                         Future[tuple[ok: bool, message: string, dynamicPort: int,
+                                      ipid: string, faultStatus, hresult: uint32]] {.async.} =
+  var scm: rpc.DceRpcClient
+  try:
+    scm =
+      if authMethod == smb.samKerberos:
+        await rpc.connectAndBindKerb(host, 135, max(timeoutMs, 8000),
+          @(dcom.IRemoteSCMActivatorUuidBytes), dcom.IRemoteSCMActivatorMajor,
+          dcom.IRemoteSCMActivatorMinor, credential.domain)
+      else:
+        await rpc.connectAndBind(host, 135, max(timeoutMs, 8000),
+          @(dcom.IRemoteSCMActivatorUuidBytes), dcom.IRemoteSCMActivatorMajor,
+          dcom.IRemoteSCMActivatorMinor, credential)
+    let createStub = dcom.buildRemoteCreateInstanceStub(
+      bytesToStrLocal(CLSIDCertAdminBytes),
+      bytesToStrLocal(ICertAdminD2UuidBytes))
+    let createResp = await scm.call(4'u16, createStub)
+    scm.close()
+    if not createResp.ok:
+      return (false, "RemoteCreateInstance fault 0x" & createResp.faultStatus.toHex(8),
+        0, "", createResp.faultStatus, 0'u32)
+    let reply = dcom.parseActivationReply(createResp.stub)
+    if reply.iwbemObjRef.std.ipid.len != 16:
+      return (false,
+        if reply.comError != 0'u32: "RemoteCreateInstance returned HRESULT 0x" & reply.comError.toHex(8)
+        else: "RemoteCreateInstance returned no ICertAdminD2 OBJREF",
+        0, "", 0'u32, reply.comError)
+    var dynamicPort = dcom.tcpPortFromBindings(reply.bindings)
+    if dynamicPort == 0:
+      dynamicPort = dcom.tcpPortFromBindings(reply.iwbemObjRef.bindings)
+    if dynamicPort == 0 and reply.oxid.len == 8 and authMethod != smb.samKerberos:
+      let resolved = await dcom.resolveOxid2(host, 135, max(timeoutMs, 8000),
+        reply.oxid, credential)
+      dynamicPort = dcom.tcpPortFromBindings(resolved.bindings)
+    if dynamicPort == 0:
+      return (false, "could not determine dynamic DCOM port for CertAdmin",
+        0, "", 0'u32, 0'u32)
+    return (true, "", dynamicPort, reply.iwbemObjRef.std.ipid, 0'u32, 0'u32)
+  except CatchableError as error:
+    if scm != nil:
+      scm.close()
+    return (false, error.msg, 0, "", 0'u32, 0'u32)
+
+proc getCASecurity*(host: string; timeoutMs: int; credential: smb.SmbCredential;
+                    authMethod: smb.SmbAuthMethod; authority: string):
+                    Future[CertAdminResult] {.async.} =
+  result.host = host
+  result.authority = authority
+  result.transport = "certadmin-dcom-tcp"
+  let opened = await openCertAdminObject(host, timeoutMs, credential, authMethod)
+  if not opened.ok:
+    result.message = opened.message
+    result.faultStatus = opened.faultStatus
+    result.hresult = opened.hresult
+    return
+  try:
+    let cli =
+      if authMethod == smb.samKerberos:
+        await rpc.connectAndBindKerb(host, opened.dynamicPort, max(timeoutMs, 8000),
+          @(ICertAdminD2UuidBytes), ICertAdminD2Major, ICertAdminD2Minor, credential.domain,
+          rpc.AuthLevelPktPrivacy)
+      else:
+        await rpc.connectAndBind(host, opened.dynamicPort, max(timeoutMs, 8000),
+          @(ICertAdminD2UuidBytes), ICertAdminD2Major, ICertAdminD2Minor, credential,
+          rpc.AuthLevelPktPrivacy)
+    let callRes = await cli.call(OpGetCASecurity,
+      buildGetCASecurityStub(authority), opened.ipid)
+    cli.close()
+    if not callRes.ok:
+      result.faultStatus = callRes.faultStatus
+      result.message = "ICertAdminD2 GetCASecurity faulted"
+      return
+    var off = 0
+    dcom.parseOrpcThat(callRes.stub, off)
+    result.securityDescriptor = parseCertTransBlob(callRes.stub, off)
+    result.hresult =
+      if off + 4 <= callRes.stub.len: readU32Le(callRes.stub, off)
+      else: parseDcomTrailingHresult(callRes.stub)
+    result.success = result.hresult == 0'u32 and result.securityDescriptor.len > 0
+    result.message =
+      if result.success: "ICertAdminD2 GetCASecurity succeeded"
+      elif result.hresult != 0'u32: "ICertAdminD2 GetCASecurity returned HRESULT 0x" & result.hresult.toHex(8)
+      else: "ICertAdminD2 GetCASecurity returned no security descriptor"
+  except CatchableError as error:
+    result.message = error.msg
+
+proc setCASecurity*(host: string; timeoutMs: int; credential: smb.SmbCredential;
+                    authMethod: smb.SmbAuthMethod; authority, sd: string):
+                    Future[CertAdminResult] {.async.} =
+  result.host = host
+  result.authority = authority
+  result.transport = "certadmin-dcom-tcp"
+  result.securityDescriptor = sd
+  let opened = await openCertAdminObject(host, timeoutMs, credential, authMethod)
+  if not opened.ok:
+    result.message = opened.message
+    result.faultStatus = opened.faultStatus
+    result.hresult = opened.hresult
+    return
+  try:
+    let cli =
+      if authMethod == smb.samKerberos:
+        await rpc.connectAndBindKerb(host, opened.dynamicPort, max(timeoutMs, 8000),
+          @(ICertAdminD2UuidBytes), ICertAdminD2Major, ICertAdminD2Minor, credential.domain,
+          rpc.AuthLevelPktPrivacy)
+      else:
+        await rpc.connectAndBind(host, opened.dynamicPort, max(timeoutMs, 8000),
+          @(ICertAdminD2UuidBytes), ICertAdminD2Major, ICertAdminD2Minor, credential,
+          rpc.AuthLevelPktPrivacy)
+    let callRes = await cli.call(OpSetCASecurity,
+      buildSetCASecurityStub(authority, sd), opened.ipid)
+    cli.close()
+    if not callRes.ok:
+      result.faultStatus = callRes.faultStatus
+      result.message = "ICertAdminD2 SetCASecurity faulted"
+      return
+    result.hresult = parseDcomTrailingHresult(callRes.stub)
+    result.success = result.hresult == 0'u32
+    result.message =
+      if result.success: "ICertAdminD2 SetCASecurity returned S_OK"
+      else: "ICertAdminD2 SetCASecurity returned HRESULT 0x" & result.hresult.toHex(8)
+  except CatchableError as error:
+    result.message = error.msg
 
 proc setConfigEntry*(host: string; timeoutMs: int; credential: smb.SmbCredential;
                      authMethod: smb.SmbAuthMethod; authority, nodePath, entry: string;

