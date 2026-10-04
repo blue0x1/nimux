@@ -31,22 +31,6 @@ Usage examples, command references, and workflow notes are maintained in the doc
 
 https://docs.nimux.wiki
 
-# Latest Release Highlights
-
-`v1.0.5` adds the lightweight discovery layer around the existing AD/remote-ops command surface:
-
-- HTTP directory, file, and vhost discovery with workers, recursion, link extraction, resume, and false-positive filters such as `-fs`
-- DNS subdomain discovery with worker support
-- Read-only SMB share spidering with depth, size, pattern, and interesting-file filters
-- Anonymous/null-session SMB share enumeration fixes
-
-It also carries the recent ADCS, BloodHound Legacy, Kerberos execution, and LDAP capture work from the `v1.0.4` line:
-
-- Native ADCS policy get/set workflows for `EditFlags` and `DisableExtensionList`
-- RPC ADCS request/auth flows with UPN/SID request support and PFX output
-- BloodHound Legacy 4.x-compatible output with ACL/object-control data
-- LDAP capture listener with random NTLM challenge generation and repeated connection handling
-
 # AI Integrations
 
 Agent guidance and MCP integration files are available in `SKILLS.md` and `integrations/`.
@@ -95,8 +79,30 @@ https://docs.nimux.wiki/mcp-integration
 # Installation
 
 ## Nimble
-```
+
+Nimble builds nimux from source, so native development libraries must be
+installed first. On Kali, Debian, or Ubuntu:
+
+```bash
+sudo apt update
+sudo apt install -y build-essential ca-certificates git libssl-dev libkrb5-dev
 nimble install nimux
+```
+
+Do not run Nimble with `sudo`. If Nimble reports an SSL certificate error,
+refresh the system CA store before retrying:
+
+```bash
+sudo apt install --reinstall ca-certificates
+sudo update-ca-certificates
+nimble refresh
+```
+
+MinGW-w64 is optional for the base installation, but is required by execution
+paths that build Windows helper binaries:
+
+```bash
+sudo apt install -y mingw-w64
 ```
 
 ## Download Release
