@@ -1,5 +1,6 @@
 import std/[asyncdispatch, asyncnet, base64, json, nativesockets, net, os, osproc, parseopt, random, re, sequtils, sets, strutils, tables, terminal, times, uri, wordwrap]
 import core/[targets, scanner, output, lineread, proxy]
+import bloodhound/inspect as bhinspect
 import protocols/smb/client as smbclient
 import protocols/ldap/client as ldapclient
 import protocols/ldap/dpaping as dpaping
@@ -33,7 +34,7 @@ import protocols/postgres/client as pgclient
 import protocols/http/client as httpclient
 import protocols/nfs/client as nfsclient
 
-const Version = "1.0.6"
+const Version = "1.0.7"
 const Author = "Chokri Hammedi (blue0x1)"
 const FileAttributeReparsePoint = 0x00000400'u32
 
@@ -1734,6 +1735,7 @@ USAGE
 
 COMMANDS
   scan      Port scanner with service detection (TCP + UDP, IPv4 + IPv6)
+  bh        Offline BloodHound ZIP inventory and group membership inspection
   smb       SMB enumeration: shares, users, groups, sessions, RID-brute, ...
   ldap      LDAP/AD query and write engine: search, add, modify, delete, LDIF, RBCD
   kerberos  Kerberos ticket ops: kinit, getST, S4U, roast, ccache/kirbi conversion
@@ -18519,6 +18521,10 @@ proc runWebDavCli(config: CliConfig) =
 proc main() =
   randomize()
   try:
+    let args = commandLineParams()
+    if args.len > 0 and args[0] == "bh":
+      bhinspect.runBh(args[1 .. ^1])
+      return
     let config = parseCli()
     if config.shellMode and config.cliMode:
       raise newException(ValueError, "--shell and --cli are mutually exclusive")

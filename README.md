@@ -13,7 +13,7 @@
 
 nimux is a native command surface for authorized security assessments. It combines network enumeration, lightweight web discovery, credential validation, Active Directory operations, Kerberos workflows, remote execution, file movement, secrets collection, DCSync, GPO operations, database clients, and SOCKS routing into one Pure-Nim toolkit.
 
-Current release: `v1.0.6`
+Current release: `v1.0.7`
 
 You are on the official public repository for nimux.
 
@@ -218,6 +218,194 @@ Build a local Debian package from source:
 ```bash
 dpkg-buildpackage -us -uc -b
 sudo apt install ../nimux_*.deb
+```
+
+## Offline BloodHound inspection
+
+`bh` reads saved BloodHound ZIPs locally. It provides inventory, collection
+coverage, object search, and direct/nested group membership inspection:
+
+```bash
+nimux bh collection.zip --summary
+nimux bh collection.zip --interesting
+nimux bh collection.zip --high-value
+nimux bh collection.zip --search alice
+nimux bh collection.zip --inspect 'ALICE@EXAMPLE.TEST'
+nimux bh collection.zip --summary --json
+nimux bh collection.zip --graph --high-value
+nimux bh collection.zip --graph --interesting
+nimux bh --help
+```
+
+`--interesting` combines critical-object inventory, privileged account membership
+review, disabled privileged accounts, password-policy exceptions, activity older
+than 90 days, and collection gaps. Staleness uses the latest collection filename
+timestamp with UTC assumed; missing, zero, or future logon timestamps remain
+unknown. Without a collection timestamp, stale-activity checks are skipped.
+These observations include evidence and administrator review guidance.
+
+`--high-value` shows recorded `highvalue=true` flags and classifications inferred
+from domain objects or exact well-known administrative group SIDs. It does not
+classify objects by display name or treat missing flags as false evidence.
+The SID classifications follow Microsoft's
+[security identifier reference](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-identifiers).
+Both reports bound displayed lists to 100 objects/accounts and retain totals.
+
+Both text reports include a static directed graph of recorded relationships.
+For compatibility, JSON retains the membership trees and explicit source/target
+identifiers: each tree is limited to six levels and 60 nodes, with omissions
+reported. These are snapshot relationships, not calculated effective access.
+
+### Native terminal graph
+
+`--interesting` and `--high-value` print their reports and a graph, then exit.
+Add `--graph` to print **only the graph**, including with `--search` or `--inspect`.
+There is no keyboard interaction, alternate screen, raw terminal mode, browser,
+new window, database, subprocess, or network service. Output stays in the normal
+terminal scrollback and can be redirected to a file. `--graph --json` is rejected;
+omit `--graph` for the existing JSON reports.
+
+Results are presented one finding at a time: a short title, a named left-to-right
+path, a plain-language explanation of each relationship, and collection evidence.
+For example (fictional data):
+
+```text
+Finding 1 · Connected recorded relationships
+
+ALICE ──MemberOf──▶ HELP DESK ──AdminTo──▶ SERVER01
+
+ALICE belongs to HELP DESK.
+HELP DESK has recorded local administrator rights on SERVER01.
+Evidence: 2 graph relationships · Members; LocalAdmins.
+```
+
+There are no numbered node boxes, crossing lines, panels, or SID lookup tables.
+Names are preserved; identifiers are added only when display names collide.
+Control characters are removed and non-ASCII identity characters become `?`.
+The graph engine now queries the full imported graph before limiting output.
+`--interesting` shows shortest directed paths from non-privileged users, computers,
+and groups to high-value objects. Principals already in high-value groups through
+membership are excluded from that preset. `--high-value` includes those principals
+but still excludes high-value sources themselves. Both use all classified high-value
+targets, not just the first 100 objects in the inventory report.
+
+Native reverse BFS and a shortest-path DAG retain equal-length alternatives,
+parallel-edge evidence, shared intermediate nodes, and paths longer than three
+relationships. Shortest paths do not repeat nodes, so cycles cannot cause loops.
+The default depth is unbounded; `--depth N` explicitly bounds it. `--limit 50` is
+the default **output** limit, not an input-edge sample. `--limit 0` requests all
+results (maximum 100,000 paths); truncation is explicit. Other safety limits are
+1,000 targets, 2 million reachable source/target pairs and 20 million reverse edge
+visits; overly broad queries fail with an explanation instead of silently sampling.
+
+```bash
+nimux bh collection.zip --interesting --graph --limit 0
+nimux bh collection.zip --graph --from 'ALICE@EXAMPLE.TEST' --to 'DOMAIN ADMINS@EXAMPLE.TEST' --limit 0
+nimux bh collection.zip --graph --inspect 'ALICE@EXAMPLE.TEST' --limit 0
+```
+
+`--from` and `--to` accept exact names or identifiers. Without `--to`, the targets
+are high-value objects; without `--from`, the applicable preset selects sources.
+Plain `--graph`, `--search ... --graph`, and `--inspect ... --graph` list individual
+recorded edges rather than arbitrarily joining them. `--limit 0` prints all matching
+edges in those modes. Path queries are text-only; existing JSON inventory/hygiene
+reports retain their previous meaning.
+
+Scope results to a single object with `--user`, `--computer`, or `--group`:
+
+```bash
+nimux bh collection.zip --user alice --interesting
+nimux bh collection.zip --computer dc01 --interesting
+nimux bh collection.zip --group 'HELP DESK' --interesting
+nimux bh collection.zip --user 'ALICE@EXAMPLE.TEST' --high-value --limit 0
+nimux bh collection.zip --user alice --to 'SERVER01.EXAMPLE.TEST' --limit 0
+nimux bh collection.zip --computer dc01
+```
+
+Typed selectors imply graph-only text output, so unrelated inventory/hygiene
+reports are not printed. With `--interesting` or `--high-value`, the selected
+object is the sole path source and the targets are high-value objects. Explicit
+selection overrides the default exclusion of already-privileged sources.
+With `--to`, it is the sole source for that destination. Without a path operation,
+the selector lists that object's incoming/outgoing relationships.
+
+Names are case-insensitive. Exact short user/group names, computer short names
+(including `DC01$`), full names/FQDNs and identifiers are accepted; substring
+matches are not. Ambiguous short names require a full name or identifier.
+Choose only one typed selector. Combining it with `--from`, `--summary`,
+`--search`, `--inspect` or `--json` is rejected explicitly.
+
+Recorded edges include `MemberOf`, ACL `RightName` labels, `AdminTo`, `CanRDP`,
+`ExecuteDCOM`, `CanPSRemote`, `HasSession`, `Contains`, `AllowedToDelegate`,
+`AllowedToAct`, `GPLink`, `HasSIDHistory`, `DumpSMSAPassword`, and `TrustedBy`.
+GPOChanges produces AdminTo/CanRDP/ExecuteDCOM/CanPSRemote edges to the recorded
+affected computers, with GPO provenance retained. ACL self-edges are excluded to
+match Legacy ingestion. Trust direction and collected trust metadata are preserved.
+ACL labels reflect the input evidence, not calculated
+effective permissions. Session and local-group results are used only when marked
+collected. Missing endpoint records are retained as explicitly marked reference
+nodes instead of dropping the edge; inventory counts still count full records.
+BloodHound Legacy 4.3.1 replication-right post-processing runs before path queries:
+
+- `DCSync`: the same principal reaches the same domain through both
+  `MemberOf|GetChanges` and `MemberOf|GetChangesAll` permission paths.
+- `SyncLAPSPassword`: `GetChanges` and `GetChangesInFilteredSet` reach the same
+  domain, and the destination computer has that exact `domainsid` and a typed
+  `haslaps=true` property. Missing metadata does not satisfy the rule.
+
+Derived edges are labeled separately and include two supporting recorded paths,
+even when the permissions come from different nested groups. Raw replication
+component rights remain inspectable, but do not count as standalone traversal
+hops; the combined derived edges are traversable. These are Legacy graph rules,
+not proof that replication or password retrieval will succeed in a live environment.
+Derivation is idempotent and bounded to 20 million edge/proof steps and 1 million
+new edges; exceeding a bound fails explicitly rather than returning partial results.
+Inventory JSON continues to count recorded edges, whereas graph views also include
+derived edges. Synthetic domain-user associations remain unimplemented.
+SPNTargets and Azure/CE-specific relations are not yet supported. A no-path result
+means no match under these rules, **not** that the environment has no risk.
+
+Implementation was compared with BloodHound Legacy 4.3.1's `newingestion.js`,
+`utils.js` (`allShortestPaths`), `PrebuiltQueries.json`, `GroupNodeData.jsx`, and
+`MenuContainer.jsx` post-processing. This is not full Cypher/query or semantic parity;
+trust, session, GPO and permission prerequisites still require separate validation.
+
+Text reports use Nimux's box layout with cyan headings and yellow review notes.
+Colors are enabled on terminals and disabled by `--no-color`, `NO_COLOR`, or
+redirection. `--json` emits a single machine-readable object without ANSI codes.
+
+Build this checkout to get the command; installing a published release does not
+include unpublished changes. The pinned pure-Nim `zippy` dependency is compiled
+into the binary. Analysis needs no ZIP executable, database server, Python, or
+network connection. No archive entries are written to disk. Existing collection
+ZIP export still uses the external `zip` command.
+
+Supported input is ordinary single-volume, unencrypted ZIP with stored or
+DEFLATE entries containing BloodHound JSON schema versions 5 or 6. This is a
+limited inventory reader, not full BloodHound CE/OpenGraph compatibility.
+Limits: 32 MiB archive, 32 MiB per JSON entry, 128 MiB total JSON, 1024 entries,
+and 200,000 object records. Deflated JSON entries are limited to 128 KiB
+compressed because the decompressor does not expose a streaming output limit.
+ZIP64 and encrypted archives are rejected with an explanation.
+
+Search returns up to 100 objects; inspection follows group memberships up to
+32 levels and 1000 groups, safely handling cycles. Compatible duplicate objects
+are merged with a warning; unresolved membership references are reported.
+Raw properties, descriptions, and password fields are omitted from output.
+Coverage distinguishes collected, not collected, and unknown. Results describe
+a snapshot: missing relationships do not establish absence of access.
+
+This version provides directed graph-path inspection, not exploitation validation,
+permission-abuse instructions, full BloodHound query compatibility, or execution integration.
+
+Developer checks (after installing the Nimble dependencies):
+
+```bash
+nim c -r tests/test_bloodhound.nim
+nim c -r tests/check_bloodhound_archives.nim /path/to/collection.zip
+# Optional developer-only static-output test (standalone inspector binary):
+nim c -o:/tmp/nimux-bh-inspect src/bloodhound/inspect.nim
+python3 tests/check_bloodhound_output.py /tmp/nimux-bh-inspect /path/to/collection.zip
 ```
 
 # Quick Examples
