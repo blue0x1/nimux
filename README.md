@@ -233,108 +233,36 @@ nimux bh collection.zip --search alice
 nimux bh collection.zip --inspect 'ALICE@EXAMPLE.TEST'
 nimux bh collection.zip --summary --json
 nimux bh collection.zip --graph --high-value
-nimux bh collection.zip --graph --interesting
 nimux bh --help
 ```
 
-`--interesting` combines critical-object inventory, privileged account membership
-review, disabled privileged accounts, password-policy exceptions, activity older
-than 90 days, and collection gaps. Staleness uses the latest collection filename
-timestamp with UTC assumed; missing, zero, or future logon timestamps remain
-unknown. Without a collection timestamp, stale-activity checks are skipped.
-These observations include evidence and administrator review guidance.
+`--interesting` highlights critical objects, privileged accounts, password-policy exceptions, stale activity, and collection gaps. `--high-value` shows objects flagged or classified as high-value by well-known domain SIDs.
 
-`--high-value` shows recorded `highvalue=true` flags and classifications inferred
-from domain objects or exact well-known administrative group SIDs. It does not
-classify objects by display name or treat missing flags as false evidence.
-The SID classifications follow Microsoft's
-[security identifier reference](https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/understand-security-identifiers).
-Both reports bound displayed lists to 100 objects/accounts and retain totals.
+### Graph output
 
-Both text reports include a static directed graph of recorded relationships.
-For compatibility, JSON retains the membership trees and explicit source/target
-identifiers: each tree is limited to six levels and 60 nodes, with omissions
-reported. These are snapshot relationships, not calculated effective access.
-
-### Native terminal graph
-
-`--interesting` and `--high-value` print their reports and a graph, then exit.
-Add `--graph` to print **only the graph**, including with `--search` or `--inspect`.
-There is no keyboard interaction, alternate screen, raw terminal mode, browser,
-new window, database, subprocess, or network service. Output stays in the normal
-terminal scrollback and can be redirected to a file. `--graph --json` is rejected;
-omit `--graph` for the existing JSON reports.
-
-Results are presented one finding at a time: a short title, a named left-to-right
-path, a plain-language explanation of each relationship, and collection evidence.
-For example (fictional data):
-
-```text
-Finding 1 · Connected recorded relationships
-
-ALICE ──MemberOf──▶ HELP DESK ──AdminTo──▶ SERVER01
-
-ALICE belongs to HELP DESK.
-HELP DESK has recorded local administrator rights on SERVER01.
-Evidence: 2 graph relationships · Members; LocalAdmins.
-```
-
-Native reverse BFS and a shortest-path DAG retain equal-length alternatives,
-parallel-edge evidence, shared intermediate nodes, and paths longer than three
-relationships. Shortest paths do not repeat nodes, so cycles cannot cause loops.
-The default depth is unbounded; `--depth N` explicitly bounds it. `--limit 50` is
-the default **output** limit, not an input-edge sample. `--limit 0` requests all
-results (maximum 100,000 paths); truncation is explicit. Other safety limits are
-1,000 targets, 2 million reachable source/target pairs and 20 million reverse edge
-visits; overly broad queries fail with an explanation instead of silently sampling.
+Add `--graph` to print a directed relationship graph in the terminal. No browser, database, or network connection required. Output stays in normal terminal scrollback and can be redirected.
 
 ```bash
 nimux bh collection.zip --interesting --graph --limit 0
-nimux bh collection.zip --graph --from 'ALICE@EXAMPLE.TEST' --to 'DOMAIN ADMINS@EXAMPLE.TEST' --limit 0
-nimux bh collection.zip --graph --inspect 'ALICE@EXAMPLE.TEST' --limit 0
+nimux bh collection.zip --graph --from 'ALICE@EXAMPLE.TEST' --to 'DOMAIN ADMINS@EXAMPLE.TEST'
+nimux bh collection.zip --graph --inspect 'ALICE@EXAMPLE.TEST'
 ```
 
-`--from` and `--to` accept exact names or identifiers. Without `--to`, the targets
-are high-value objects; without `--from`, the applicable preset selects sources.
-Plain `--graph`, `--search ... --graph`, and `--inspect ... --graph` list individual
-recorded edges rather than arbitrarily joining them. `--limit 0` prints all matching
-edges in those modes. Path queries are text-only; existing JSON inventory/hygiene
-reports retain their previous meaning.
-
-Scope results to a single object with `--user`, `--computer`, or `--group`:
+Scope to a single object with `--user`, `--computer`, or `--group`:
 
 ```bash
 nimux bh collection.zip --user alice --interesting
 nimux bh collection.zip --computer dc01 --interesting
 nimux bh collection.zip --group 'HELP DESK' --interesting
-nimux bh collection.zip --user 'ALICE@EXAMPLE.TEST' --high-value --limit 0
-nimux bh collection.zip --user alice --to 'SERVER01.EXAMPLE.TEST' --limit 0
-nimux bh collection.zip --computer dc01
 ```
 
-Names are case-insensitive. Exact short user/group names, computer short names
-(including `DC01$`), full names/FQDNs and identifiers are accepted; substring
-matches are not. Ambiguous short names require a full name or identifier.
-Choose only one typed selector. Combining it with `--from`, `--summary`,
-`--search`, `--inspect` or `--json` is rejected explicitly.
+Supported input: single-volume, unencrypted ZIP with BloodHound JSON schema v5 or v6. No external tools required; analysis runs entirely in-process.
 
-
-- `DCSync`: the same principal reaches the same domain through both
-  `MemberOf|GetChanges` and `MemberOf|GetChangesAll` permission paths.
-- `SyncLAPSPassword`: `GetChanges` and `GetChangesInFilteredSet` reach the same
-  domain, and the destination computer has that exact `domainsid` and a typed
-  `haslaps=true` property. Missing metadata does not satisfy the rule.
-
-
-
-Developer checks (after installing the Nimble dependencies):
+Developer checks:
 
 ```bash
 nim c -r tests/test_bloodhound.nim
 nim c -r tests/check_bloodhound_archives.nim /path/to/collection.zip
-# Optional developer-only static-output test (standalone inspector binary):
-nim c -o:/tmp/nimux-bh-inspect src/bloodhound/inspect.nim
-python3 tests/check_bloodhound_output.py /tmp/nimux-bh-inspect /path/to/collection.zip
 ```
 
 # Quick Examples
