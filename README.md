@@ -279,16 +279,6 @@ HELP DESK has recorded local administrator rights on SERVER01.
 Evidence: 2 graph relationships · Members; LocalAdmins.
 ```
 
-There are no numbered node boxes, crossing lines, panels, or SID lookup tables.
-Names are preserved; identifiers are added only when display names collide.
-Control characters are removed and non-ASCII identity characters become `?`.
-The graph engine now queries the full imported graph before limiting output.
-`--interesting` shows shortest directed paths from non-privileged users, computers,
-and groups to high-value objects. Principals already in high-value groups through
-membership are excluded from that preset. `--high-value` includes those principals
-but still excludes high-value sources themselves. Both use all classified high-value
-targets, not just the first 100 objects in the inventory report.
-
 Native reverse BFS and a shortest-path DAG retain equal-length alternatives,
 parallel-edge evidence, shared intermediate nodes, and paths longer than three
 relationships. Shortest paths do not repeat nodes, so cycles cannot cause loops.
@@ -322,30 +312,12 @@ nimux bh collection.zip --user alice --to 'SERVER01.EXAMPLE.TEST' --limit 0
 nimux bh collection.zip --computer dc01
 ```
 
-Typed selectors imply graph-only text output, so unrelated inventory/hygiene
-reports are not printed. With `--interesting` or `--high-value`, the selected
-object is the sole path source and the targets are high-value objects. Explicit
-selection overrides the default exclusion of already-privileged sources.
-With `--to`, it is the sole source for that destination. Without a path operation,
-the selector lists that object's incoming/outgoing relationships.
-
 Names are case-insensitive. Exact short user/group names, computer short names
 (including `DC01$`), full names/FQDNs and identifiers are accepted; substring
 matches are not. Ambiguous short names require a full name or identifier.
 Choose only one typed selector. Combining it with `--from`, `--summary`,
 `--search`, `--inspect` or `--json` is rejected explicitly.
 
-Recorded edges include `MemberOf`, ACL `RightName` labels, `AdminTo`, `CanRDP`,
-`ExecuteDCOM`, `CanPSRemote`, `HasSession`, `Contains`, `AllowedToDelegate`,
-`AllowedToAct`, `GPLink`, `HasSIDHistory`, `DumpSMSAPassword`, and `TrustedBy`.
-GPOChanges produces AdminTo/CanRDP/ExecuteDCOM/CanPSRemote edges to the recorded
-affected computers, with GPO provenance retained. ACL self-edges are excluded to
-match Legacy ingestion. Trust direction and collected trust metadata are preserved.
-ACL labels reflect the input evidence, not calculated
-effective permissions. Session and local-group results are used only when marked
-collected. Missing endpoint records are retained as explicitly marked reference
-nodes instead of dropping the edge; inventory counts still count full records.
-BloodHound Legacy 4.3.1 replication-right post-processing runs before path queries:
 
 - `DCSync`: the same principal reaches the same domain through both
   `MemberOf|GetChanges` and `MemberOf|GetChangesAll` permission paths.
@@ -353,50 +325,7 @@ BloodHound Legacy 4.3.1 replication-right post-processing runs before path queri
   domain, and the destination computer has that exact `domainsid` and a typed
   `haslaps=true` property. Missing metadata does not satisfy the rule.
 
-Derived edges are labeled separately and include two supporting recorded paths,
-even when the permissions come from different nested groups. Raw replication
-component rights remain inspectable, but do not count as standalone traversal
-hops; the combined derived edges are traversable. These are Legacy graph rules,
-not proof that replication or password retrieval will succeed in a live environment.
-Derivation is idempotent and bounded to 20 million edge/proof steps and 1 million
-new edges; exceeding a bound fails explicitly rather than returning partial results.
-Inventory JSON continues to count recorded edges, whereas graph views also include
-derived edges. Synthetic domain-user associations remain unimplemented.
-SPNTargets and Azure/CE-specific relations are not yet supported. A no-path result
-means no match under these rules, **not** that the environment has no risk.
 
-Implementation was compared with BloodHound Legacy 4.3.1's `newingestion.js`,
-`utils.js` (`allShortestPaths`), `PrebuiltQueries.json`, `GroupNodeData.jsx`, and
-`MenuContainer.jsx` post-processing. This is not full Cypher/query or semantic parity;
-trust, session, GPO and permission prerequisites still require separate validation.
-
-Text reports use Nimux's box layout with cyan headings and yellow review notes.
-Colors are enabled on terminals and disabled by `--no-color`, `NO_COLOR`, or
-redirection. `--json` emits a single machine-readable object without ANSI codes.
-
-Build this checkout to get the command; installing a published release does not
-include unpublished changes. The pinned pure-Nim `zippy` dependency is compiled
-into the binary. Analysis needs no ZIP executable, database server, Python, or
-network connection. No archive entries are written to disk. Existing collection
-ZIP export still uses the external `zip` command.
-
-Supported input is ordinary single-volume, unencrypted ZIP with stored or
-DEFLATE entries containing BloodHound JSON schema versions 5 or 6. This is a
-limited inventory reader, not full BloodHound CE/OpenGraph compatibility.
-Limits: 32 MiB archive, 32 MiB per JSON entry, 128 MiB total JSON, 1024 entries,
-and 200,000 object records. Deflated JSON entries are limited to 128 KiB
-compressed because the decompressor does not expose a streaming output limit.
-ZIP64 and encrypted archives are rejected with an explanation.
-
-Search returns up to 100 objects; inspection follows group memberships up to
-32 levels and 1000 groups, safely handling cycles. Compatible duplicate objects
-are merged with a warning; unresolved membership references are reported.
-Raw properties, descriptions, and password fields are omitted from output.
-Coverage distinguishes collected, not collected, and unknown. Results describe
-a snapshot: missing relationships do not establish absence of access.
-
-This version provides directed graph-path inspection, not exploitation validation,
-permission-abuse instructions, full BloodHound query compatibility, or execution integration.
 
 Developer checks (after installing the Nimble dependencies):
 
